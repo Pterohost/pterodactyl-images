@@ -1,0 +1,96 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "images/**"
+      - "shared/**"
+      - ".github/workflows/build.yml"
+  schedule:
+    # Weekly refresh to pick up base-image patches.
+    - cron: "0 5 * * 1"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: "${{ matrix.tag }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: java_7
+            dir: java-7
+          - tag: java_8
+            dir: java-8
+          - tag: java_11
+            dir: java-11
+          - tag: java_16
+            dir: java-16
+          - tag: java_17
+            dir: java-17
+          - tag: java_17_graalvm
+            dir: java-17-graalvm
+          - tag: java_18
+            dir: java-18
+          - tag: java_21
+            dir: java-21
+          - tag: java_21_graalvm
+            dir: java-21-graalvm
+          - tag: java_24
+            dir: java-24
+          - tag: java_24_graalvm
+            dir: java-24-graalvm
+          - tag: java_25
+            dir: java-25
+          - tag: java_25_graalvm
+            dir: java-25-graalvm
+          - tag: java_26_ea
+            dir: java-26-ea
+          - tag: java_26_ea_graalvm
+            dir: java-26-ea-graalvm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./images/${{ matrix.dir }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ghcr.io/pterohost/pterodactyl-images:${{ matrix.tag }}
+            ghcr.io/pterohost/pterodactyl-images:${{ matrix.tag }}-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.url=https://github.com/Pterohost/pterodactyl-images
