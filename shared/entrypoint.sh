@@ -22,6 +22,6 @@ CYAN=$'\033[0;36m'
 RESET=$'\033[0m'
 printf '%bSTARTUP%b /home/container: %s\n' "${CYAN}" "${RESET}" "${MODIFIED_STARTUP}"
 
-# Hand PID 1 over to the server process so signals propagate cleanly.
-# shellcheck disable=SC2086
-exec ${MODIFIED_STARTUP}
+# eval expands ${VAR} references inside MODIFIED_STARTUP (e.g. ${SERVER_MEMORY}),
+# then exec replaces PID 1 so signals propagate cleanly.
+eval "exec ${MODIFIED_STARTUP}"
