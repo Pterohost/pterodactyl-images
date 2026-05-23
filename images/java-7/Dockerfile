@@ -22,6 +22,7 @@ WORKDIR /home/container
 COPY --chmod=755 shared/entrypoint.sh /entrypoint.sh
 COPY --chmod=755 shared/sysinfo.sh /sysinfo.sh
 COPY shared/motd.txt /motd.txt
+COPY shared/nodes.tsv /etc/pterohost/nodes.tsv
 USER container
 
 ENTRYPOINT ["/usr/bin/tini","-g","--"]

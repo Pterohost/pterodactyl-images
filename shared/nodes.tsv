@@ -1,0 +1,7 @@
+# Pterohost WireGuard private-subnet hostname map.
+# Format: <ip>\t<hostname>
+# Update this file and rebuild the images when a node is added or relocated.
+192.168.150.1	panel.pterohost.com
+192.168.150.2	node09.pterohost.com
+192.168.151.2	node06.pterohost.com
+192.168.153.2	node10.pterohost.com

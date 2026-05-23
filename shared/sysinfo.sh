@@ -92,20 +92,15 @@ internal_ip=$(ip route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src
 # ---------- Hostname ----------
 # Resolution order:
 #   1) PTEROHOST_NODE env var (set per-node in Wings docker env)
-#   2) built-in mapping for the WireGuard private subnet
+#   2) /etc/pterohost/nodes.tsv  (shipped with the image, can be edited in repo)
 #   3) reverse DNS lookup
 #   4) plain container hostname
 host_name=""
 if [ -n "${PTEROHOST_NODE:-}" ]; then
     host_name="$PTEROHOST_NODE"
 fi
-if [ -z "$host_name" ]; then
-    case "$internal_ip" in
-        192.168.150.1)  host_name="panel.pterohost.com" ;;
-        192.168.150.2)  host_name="node09.pterohost.com" ;;
-        192.168.150.3)  host_name="node06.pterohost.com" ;;
-        192.168.150.4)  host_name="node10.pterohost.com" ;;
-    esac
+if [ -z "$host_name" ] && [ -r /etc/pterohost/nodes.tsv ]; then
+    host_name=$(awk -v ip="$internal_ip" '$1==ip {print $2; exit}' /etc/pterohost/nodes.tsv 2>/dev/null)
 fi
 if [ -z "$host_name" ] && command -v getent >/dev/null 2>&1; then
     host_name=$(getent hosts "$internal_ip" 2>/dev/null | awk '{print $2; exit}')
