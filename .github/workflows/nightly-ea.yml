@@ -24,8 +24,6 @@ jobs:
         include:
           - tag: java_26_ea
             dir: java-26-ea
-          - tag: java_26_ea_graalvm
-            dir: java-26-ea-graalvm
 
     steps:
       - uses: actions/checkout@v4

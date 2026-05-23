@@ -1,4 +1,4 @@
-FROM bellsoft/liberica-openjdk-debian:26-ea
+FROM bellsoft/liberica-openjdk-debian:26
 
 LABEL org.opencontainers.image.source="https://github.com/Pterohost/pterodactyl-images"
 LABEL org.opencontainers.image.licenses="MIT"

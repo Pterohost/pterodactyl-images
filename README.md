@@ -25,7 +25,8 @@ License: MIT
 | `java_25` | Eclipse Temurin 25 | 25 LTS | Generational ZGC | ubuntu:noble | stable |
 | `java_25_graalvm` | GraalVM CE | 25 LTS | G1 | oraclelinux:8 | stable |
 | `java_26_ea` | BellSoft Liberica | 26 EA | Generational ZGC | debian:bookworm | early access |
-| `java_26_ea_graalvm` | GraalVM CE dev | 26 EA | G1 | oraclelinux:8 | early access |
+
+> A `java_26_ea_graalvm` tag will be added once GraalVM CE publishes a 26 dev image.
 
 All tags are multi-arch manifest lists - `docker pull` selects the right layer automatically.
 Tags are also published with the commit SHA suffix (`:<tag>-<sha>`) for pinning.
@@ -34,7 +35,7 @@ Tags are also published with the commit SHA suffix (`:<tag>-<sha>`) for pinning.
 
 | Registry | JDK range | GraalVM | Multi-arch | Default GC (modern) | Branded entrypoint | Diagnostics |
 |---|---|---|---|---|---|---|
-| `ghcr.io/pterohost/pterodactyl-images` | 7 - 26 | 5 versions (17, 21, 24, 25, 26) | amd64 + arm64 | Generational ZGC / Shenandoah | yes | CPU, RAM, GC, cgroup-aware |
+| `ghcr.io/pterohost/pterodactyl-images` | 7 - 26 | 4 versions (17, 21, 24, 25) | amd64 + arm64 | Generational ZGC / Shenandoah | yes | CPU, RAM, GC, cgroup-aware |
 | `ghcr.io/pterodactyl/yolks` | 8 - 21 | no | amd64 + arm64 | G1 | no | none |
 | `ghcr.io/parkervcp/yolks` | 8 - 25 | no | amd64 | G1 | no | none |
 | `ghcr.io/rikodev/pterodactyl-graalvm` | 25 only | yes | amd64 | G1 | no | none |

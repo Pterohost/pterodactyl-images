@@ -56,8 +56,6 @@ jobs:
             dir: java-25-graalvm
           - tag: java_26_ea
             dir: java-26-ea
-          - tag: java_26_ea_graalvm
-            dir: java-26-ea-graalvm
 
     steps:
       - name: Checkout
