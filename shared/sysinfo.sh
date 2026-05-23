@@ -69,16 +69,48 @@ human_bytes() {
     }'
 }
 
-# ---------- Disk ----------
-disk_info=$(df -h /home/container 2>/dev/null | awk 'NR==2 {printf "%s used / %s total (%s free)", $3, $2, $4}')
-[ -z "$disk_info" ] && disk_info="n/a"
+# Round bytes up to the nearest realistic memory size (in GiB).
+# Hides the small overhead that the kernel/BIOS reserves on bare metal
+# (e.g. 124.92 GiB host -> 128 GiB).
+human_bytes_rounded_gib() {
+    awk -v b="$1" 'BEGIN{
+        if (b == "" || b+0 == 0) { print "n/a"; exit }
+        gib = b / 1073741824
+        n = split("1 2 4 8 12 16 24 32 48 64 96 128 160 192 256 320 384 512 768 1024 1536 2048 3072 4096", std, " ")
+        for (i = 1; i <= n; i++) {
+            if (gib <= std[i] * 1.02) { printf "%d GiB", std[i]; exit }
+        }
+        printf "%d GiB", int(gib + 0.5)
+    }'
+}
 
 # ---------- Network ----------
 internal_ip=$(ip route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
 [ -z "$internal_ip" ] && internal_ip=$(hostname -i 2>/dev/null | awk '{print $1}')
 [ -z "$internal_ip" ] && internal_ip="n/a"
 
-host_name=$(hostname 2>/dev/null || echo "?")
+# ---------- Hostname ----------
+# Resolution order:
+#   1) PTEROHOST_NODE env var (set per-node in Wings docker env)
+#   2) built-in mapping for the WireGuard private subnet
+#   3) reverse DNS lookup
+#   4) plain container hostname
+host_name=""
+if [ -n "${PTEROHOST_NODE:-}" ]; then
+    host_name="$PTEROHOST_NODE"
+fi
+if [ -z "$host_name" ]; then
+    case "$internal_ip" in
+        192.168.150.1)  host_name="panel.pterohost.com" ;;
+        192.168.150.2)  host_name="node09.pterohost.com" ;;
+        192.168.150.3)  host_name="node06.pterohost.com" ;;
+        192.168.150.4)  host_name="node10.pterohost.com" ;;
+    esac
+fi
+if [ -z "$host_name" ] && command -v getent >/dev/null 2>&1; then
+    host_name=$(getent hosts "$internal_ip" 2>/dev/null | awk '{print $2; exit}')
+fi
+[ -z "$host_name" ] && host_name=$(hostname 2>/dev/null || echo "?")
 
 # ---------- JDK ----------
 jdk_line="not detected"
@@ -107,8 +139,7 @@ hr
 row "CPU model"      "${cpu_model:-unknown}"
 row "CPU cores"      "${cpu_cores}${cpu_quota:+ (quota: ${cpu_quota})}"
 row "Memory limit"   "$(human_bytes "${mem_limit_bytes:-}")"
-row "Host memory"    "$(human_bytes "${mem_total_bytes:-}")"
-row "Disk /home"     "${disk_info}"
+row "Host memory"    "$(human_bytes_rounded_gib "${mem_total_bytes:-}")"
 row "Internal IP"    "${internal_ip}"
 row "Hostname"       "${host_name}"
 
