@@ -2,40 +2,48 @@
 # Pterohost s&box bootstrap.
 #
 # Invoked via the shared entrypoint (Wings STARTUP="start-sbox" -> eval exec
-# start-sbox). Updates the dedicated server through SteamCMD, wires up the
-# Steam client SDK, normalizes Facepunch's CRLF scripts, then exec's the
-# native Linux server so signals reach it via tini.
+# start-sbox). Updates the dedicated server via anonymous SteamCMD, wires up the
+# Steam client SDK, then launches the server.
 #
-# Env (supplied by the Pterodactyl egg / Wings):
-#   GAME                  game package ident, e.g. facepunch.sandbox
-#   MAP                   optional map package ident (positional after +game)
-#   SERVER_NAME           +hostname value
-#   SERVER_PORT           primary allocation port (auto-injected by Wings)
-#   QUERY_PORT            +net_query_port (defaults to SERVER_PORT)
-#   TOKEN                 optional Steam game server token
-#   SBOX_AUTO_UPDATE      1 = SteamCMD validate on boot (default 1)
-#   SBOX_BRANCH           optional Steam beta branch (e.g. staging)
-#   SBOX_STEAMCMD_TIMEOUT max seconds for the SteamCMD step (default 600)
-#   STEAMCMD_EXTRA_ARGS   extra raw SteamCMD args
-#   SBOX_EXTRA_ARGS       extra raw server args appended last
+# Runtime is selected by RUNTIME_MODE:
+#   wine  (default) - Windows depot run under Wine. The only working path today;
+#                     the depot bundles its own .NET, so no Windows .NET prefix.
+#   linux           - native Linux binary. Reserved for when Facepunch ships an
+#                     installable Linux depot (currently "Missing configuration").
+#
+# Env (from the Pterodactyl egg / Wings):
+#   GAME, MAP, SERVER_NAME, SERVER_PORT (auto), QUERY_PORT, MAX_PLAYERS, TOKEN,
+#   ENABLE_DIRECT_CONNECT, SBOX_AUTO_UPDATE, SBOX_BRANCH, SBOX_STEAMCMD_TIMEOUT,
+#   STEAMCMD_EXTRA_ARGS, SBOX_EXTRA_ARGS, RUNTIME_MODE.
 set -u
 
 APPID=1892930
 STEAMCMD_DIR="${STEAMCMD_DIR:-/opt/steamcmd}"
-INSTALL_DIR="/home/container"
+INSTALL_DIR="/home/container/sbox"
+RUNTIME_MODE="${RUNTIME_MODE:-wine}"
 
-cd "${INSTALL_DIR}" || { echo "[sbox] FATAL: cannot cd ${INSTALL_DIR}"; exit 1; }
+cd /home/container || { echo "[sbox] FATAL: cannot cd /home/container"; exit 1; }
+mkdir -p "${INSTALL_DIR}"
+
+# Runtime decides which Steam depot to pull: wine/proton need the Windows build,
+# native linux needs the (not-yet-available) Linux build.
+case "${RUNTIME_MODE}" in
+    linux) STEAM_PLATFORM=linux ;;
+    *)     STEAM_PLATFORM=windows ;;
+esac
 
 # ---------------------------------------------------------------------------
 # 1. Update / validate the dedicated server via anonymous SteamCMD.
 # ---------------------------------------------------------------------------
 if [ "${SBOX_AUTO_UPDATE:-1}" = "1" ]; then
-    echo "[sbox] Updating dedicated server (app ${APPID})${SBOX_BRANCH:+, branch ${SBOX_BRANCH}}..."
+    echo "[sbox] Updating server (app ${APPID}, platform ${STEAM_PLATFORM}${SBOX_BRANCH:+, branch ${SBOX_BRANCH}})..."
     branch_args=()
     [ -n "${SBOX_BRANCH:-}" ] && branch_args=(-beta "${SBOX_BRANCH}")
 
     # shellcheck disable=SC2086
     timeout "${SBOX_STEAMCMD_TIMEOUT:-600}" "${STEAMCMD_DIR}/steamcmd.sh" \
+        +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
+        +@sSteamCmdForcePlatformType "${STEAM_PLATFORM}" \
         +force_install_dir "${INSTALL_DIR}" \
         +login anonymous \
         +app_update "${APPID}" "${branch_args[@]}" ${STEAMCMD_EXTRA_ARGS:-} validate \
@@ -48,41 +56,61 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Steam client SDK symlink - required before Steamworks initializes.
 # ---------------------------------------------------------------------------
-mkdir -p "${HOME}/.steam/sdk64" "${HOME}/.steam/sdk32"
+mkdir -p "${HOME}/.steam/sdk64"
 ln -sf "${STEAMCMD_DIR}/linux64/steamclient.so" "${HOME}/.steam/sdk64/steamclient.so"
-ln -sf "${STEAMCMD_DIR}/linux32/steamclient.so" "${HOME}/.steam/sdk32/steamclient.so" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 3. Normalize CRLF in any shell scripts Facepunch ships (issue #10706).
+# 3. Normalize CRLF on any helper scripts Facepunch ships.
 # ---------------------------------------------------------------------------
 find "${INSTALL_DIR}" -maxdepth 4 -type f -name '*.sh' -print0 2>/dev/null \
     | xargs -0 -r sed -i 's/\r$//' 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 4. Locate the server binary (native ELF; the .exe name is historical).
+# 4. Locate the server binary.
 # ---------------------------------------------------------------------------
-BIN="$(find "${INSTALL_DIR}" -maxdepth 5 -type f \
-        \( -name 'sbox-server' -o -name 'sbox-server.exe' \) 2>/dev/null | head -n1)"
-
-if [ -z "${BIN}" ]; then
-    echo "[sbox] ERROR: server binary not found under ${INSTALL_DIR}."
-    echo "[sbox] SteamCMD may have failed - check the log above (Steam branch, disk space, network)."
+SERVER_EXE="$(find "${INSTALL_DIR}" -maxdepth 4 -type f -name 'sbox-server.exe' 2>/dev/null | head -n1)"
+[ -z "${SERVER_EXE}" ] && SERVER_EXE="$(find "${INSTALL_DIR}" -maxdepth 4 -type f -name 'sbox-server' 2>/dev/null | head -n1)"
+if [ -z "${SERVER_EXE}" ]; then
+    echo "[sbox] ERROR: sbox-server(.exe) not found under ${INSTALL_DIR}."
+    echo "[sbox] SteamCMD likely failed - check the log above (platform=${STEAM_PLATFORM}, branch, disk, network)."
     exit 1
 fi
-chmod +x "${BIN}" 2>/dev/null || true
-cd "$(dirname "${BIN}")" || { echo "[sbox] FATAL: cannot cd server dir"; exit 1; }
+cd "$(dirname "${SERVER_EXE}")" || { echo "[sbox] FATAL: cannot cd server dir"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 5. Assemble launch arguments.
+#    ENABLE_DIRECT_CONNECT=1 exposes the real address (+net_hide_address 0);
+#    otherwise the server stays behind the Steam relay (address hidden).
 # ---------------------------------------------------------------------------
+HIDE_ADDRESS=1
+[ "${ENABLE_DIRECT_CONNECT:-0}" = "1" ] && HIDE_ADDRESS=0
+
 ARGS=( +game "${GAME:-facepunch.sandbox}" )
-[ -n "${MAP:-}" ]    && ARGS+=( "${MAP}" )
+[ -n "${MAP:-}" ]         && ARGS+=( "${MAP}" )
 ARGS+=( +hostname "${SERVER_NAME:-Pterohost s&box Server}" )
-ARGS+=( +port "${SERVER_PORT:-27015}" )
+[ -n "${MAX_PLAYERS:-}" ] && ARGS+=( +maxplayers "${MAX_PLAYERS}" )
+ARGS+=( +net_hide_address "${HIDE_ADDRESS}" +port "${SERVER_PORT:-27015}" )
 ARGS+=( +net_query_port "${QUERY_PORT:-${SERVER_PORT:-27015}}" )
-[ -n "${TOKEN:-}" ]  && ARGS+=( +net_game_server_token "${TOKEN}" )
+[ -n "${TOKEN:-}" ]       && ARGS+=( +net_game_server_token "${TOKEN}" )
 
-echo "[sbox] Launching: $(basename "${BIN}") ${ARGS[*]} ${SBOX_EXTRA_ARGS:-}"
+echo "[sbox] runtime=${RUNTIME_MODE} launching $(basename "${SERVER_EXE}") ${ARGS[*]} ${SBOX_EXTRA_ARGS:-}"
 
-# shellcheck disable=SC2086
-exec "${BIN}" "${ARGS[@]}" ${SBOX_EXTRA_ARGS:-}
+# ---------------------------------------------------------------------------
+# 6. Launch. exec so tini forwards SIGTERM/SIGINT straight to the server.
+# ---------------------------------------------------------------------------
+case "${RUNTIME_MODE}" in
+    linux)
+        chmod +x "${SERVER_EXE}" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        exec "${SERVER_EXE}" "${ARGS[@]}" ${SBOX_EXTRA_ARGS:-}
+        ;;
+    *)
+        # Framework-dependent .NET 10 app: point the Windows apphost at the
+        # baked Windows runtime (Z: maps to / inside the Wine prefix).
+        export DOTNET_ROOT='Z:\opt\sbox-dotnet'
+        export DOTNET_ROOT_X64='Z:\opt\sbox-dotnet'
+        # Wine inherits the container PTY for console input.
+        # shellcheck disable=SC2086
+        exec wine "${SERVER_EXE}" "${ARGS[@]}" ${SBOX_EXTRA_ARGS:-}
+        ;;
+esac
