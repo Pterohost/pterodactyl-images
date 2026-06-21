@@ -32,13 +32,19 @@ License: MIT
 
 | Tag | Runtime | Base | Arch | Notes |
 |---|---|---|---|---|
-| `sbox` | s&box dedicated server (SteamCMD + .NET, native Linux) | ubuntu:24.04 | amd64 | Steam app `1892930`, anonymous SteamCMD. See below. |
+| `sbox` | s&box dedicated server (SteamCMD + Wine) | ubuntu:24.04 | amd64 | Steam app `1892930`, anonymous SteamCMD. See below. |
 
-The `sbox` tag bundles SteamCMD and the .NET runtime and ships a `start-sbox`
-bootstrap (downloads/validates the server into `/home/container`, symlinks the
-Steam client SDK, strips CRLF from Facepunch scripts, then launches the native
-Linux server). Use it with a Pterodactyl egg whose startup command is
-`start-sbox`. amd64 only - s&box has no ARM server build.
+The `sbox` tag bundles SteamCMD and Wine and ships a `start-sbox` bootstrap
+(downloads/validates the server, symlinks the Steam client SDK, then launches
+the server). Use it with a Pterodactyl egg whose startup command is `start-sbox`.
+amd64 only - s&box has no ARM build.
+
+s&box currently only ships an anonymously-installable build on the **Windows**
+depot; the native Linux depot returns `Missing configuration` from SteamCMD. So
+the default runtime is `RUNTIME_MODE=wine` (Windows build under Wine; the depot
+bundles its own .NET). The base is Ubuntu 24.04 (glibc >= 2.38) so that
+`RUNTIME_MODE=linux` can run the native binary on this same image once Facepunch
+publishes an installable Linux depot.
 
 All tags are multi-arch manifest lists - `docker pull` selects the right layer automatically.
 Tags are also published with the commit SHA suffix (`:<tag>-<sha>`) for pinning.

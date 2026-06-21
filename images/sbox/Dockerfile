@@ -1,61 +1,73 @@
-# Pterohost s&box dedicated server image (native Linux runtime).
+# Pterohost s&box dedicated server image.
 #
-# s&box's dedicated server (Steam AppID 1892930) ships an x86-64 native Linux
-# build that runs on .NET. It needs a modern toolchain (glibc >= 2.38 /
-# libstdc++ >= 3.4.31), which is why the base is Ubuntu 24.04 (noble) and not
-# Debian bookworm. SteamCMD downloads/validates the server into the persistent
-# /home/container volume at install/boot time (see start-sbox).
+# s&box's dedicated server (Steam app 1892930) currently only ships an
+# installable build on the WINDOWS depot - the native Linux depot has no
+# anonymously-installable public/staging configuration yet ("Missing
+# configuration" from SteamCMD). So today the server is the Windows build run
+# under Wine (the .NET runtime ships self-contained inside the depot, so no
+# Windows .NET install in the prefix is needed).
 #
-# Everything the image provides (SteamCMD, .NET, start-sbox) lives OUTSIDE
+# The base is Ubuntu 24.04 (glibc >= 2.38) on purpose: when Facepunch publishes
+# an installable Linux depot, RUNTIME_MODE=linux can run the native binary on
+# this same base without a base-image swap (see start-sbox).
+#
+# Everything the image provides (Wine, SteamCMD, start-sbox) lives OUTSIDE
 # /home/container, because Wings bind-mounts the server volume over that path
-# at runtime and would otherwise shadow anything baked there.
+# at runtime. The Wine prefix and server files live in the volume and persist.
 FROM ubuntu:24.04
 
 LABEL org.opencontainers.image.source="https://github.com/Pterohost/pterodactyl-images"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.vendor="Pterohost"
-LABEL org.opencontainers.image.title="Pterohost s&box (native Linux, SteamCMD + .NET)"
-LABEL org.opencontainers.image.description="s&box dedicated server (Steam app 1892930) on a native Linux .NET runtime. amd64 only."
-
-# .NET runtime channels to install (newest first). s&box's native Linux server
-# currently targets .NET 10; 9.0 is kept as a roll-forward fallback. Override at
-# build time with --build-arg DOTNET_CHANNELS="10.0" once the target is pinned.
-ARG DOTNET_CHANNELS="10.0 9.0"
+LABEL org.opencontainers.image.title="Pterohost s&box (Wine, SteamCMD)"
+LABEL org.opencontainers.image.description="s&box dedicated server (Steam app 1892930) - Windows build under Wine. amd64 only. RUNTIME_MODE=linux reserved for the future native depot."
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# The s&box server is a framework-dependent .NET 10 app; the Windows depot ships
+# the runtime only as a Steam redist installer that never runs on Linux. Bake the
+# Windows x64 .NET runtime so the apphost finds it under Wine via DOTNET_ROOT
+# (set in start-sbox). Roll-forward covers the depot's exact 10.0.x patch.
+ARG DOTNET_WIN_URL="https://aka.ms/dotnet/10.0/dotnet-runtime-win-x64.zip"
+
+# Base tooling + WineHQ stable (needs i386 for the 32-bit Wine parts).
 RUN dpkg --add-architecture i386 \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl wget gnupg locales tar tini tzdata \
-        procps iproute2 lsof file xz-utils \
-        libc6 libstdc++6 libicu74 zlib1g openssl \
-        lib32gcc-s1 lib32stdc++6 libsdl2-2.0-0 \
+        ca-certificates curl wget gnupg locales tar tini tzdata unzip \
+        procps iproute2 lsof file xz-utils cabextract \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key \
+    && wget -qO /etc/apt/sources.list.d/winehq-noble.sources https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends winehq-stable \
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
-    && useradd -m -d /home/container -s /bin/bash container
-
-# .NET runtime(s) via the official install script, into a system path.
-RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
-    && for ch in ${DOTNET_CHANNELS}; do \
-         bash /tmp/dotnet-install.sh --channel "$ch" --runtime aspnetcore \
-             --install-dir /usr/share/dotnet --no-path; \
-       done \
-    && ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet \
-    && rm -f /tmp/dotnet-install.sh
+    && useradd -m -d /home/container -s /bin/bash container \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
 
 # SteamCMD into /opt (writable by the container user so it can self-update).
 RUN mkdir -p /opt/steamcmd \
     && curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
        | tar -xz -C /opt/steamcmd \
-    && chown -R container:container /opt/steamcmd \
-    && rm -rf /var/lib/apt/lists/*
+    && chown -R container:container /opt/steamcmd
+
+# Windows x64 .NET runtime for the server (run under Wine), pointed to by
+# DOTNET_ROOT=Z:\opt\sbox-dotnet at launch.
+RUN mkdir -p /opt/sbox-dotnet \
+    && curl -fsSL "${DOTNET_WIN_URL}" -o /tmp/dotnet-win.zip \
+    && unzip -q /tmp/dotnet-win.zip -d /opt/sbox-dotnet \
+    && rm -f /tmp/dotnet-win.zip \
+    && test -d /opt/sbox-dotnet/shared/Microsoft.NETCore.App
 
 ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 LANGUAGE=en_US.UTF-8 \
     USER=container HOME=/home/container \
-    DOTNET_ROOT=/usr/share/dotnet \
-    DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 \
     STEAMCMD_DIR=/opt/steamcmd \
-    PATH=/usr/local/bin:/usr/share/dotnet:/opt/steamcmd:/usr/bin:/bin \
+    WINEPREFIX=/home/container/.wine WINEARCH=win64 WINEDEBUG=-all \
+    WINEDLLOVERRIDES="icu,icuuc=d" \
+    DOTNET_EnableWriteXorExecute=0 DOTNET_TieredCompilation=0 \
+    DOTNET_ReadyToRun=0 DOTNET_ZapDisable=1 \
+    XDG_RUNTIME_DIR=/tmp \
+    PATH=/usr/local/bin:/opt/steamcmd:/usr/bin:/bin \
     PTEROHOST_JDK_TAG=sbox
 
 WORKDIR /home/container
