@@ -40,6 +40,11 @@ if [ "${SBOX_AUTO_UPDATE:-1}" = "1" ]; then
     branch_args=()
     [ -n "${SBOX_BRANCH:-}" ] && branch_args=(-beta "${SBOX_BRANCH}")
 
+    # On first run SteamCMD self-updates and restarts itself, which drops the
+    # forced platform type and makes the real app_update fail with "Missing
+    # configuration". Do that self-update in a throwaway pass first.
+    "${STEAMCMD_DIR}/steamcmd.sh" +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 +quit >/dev/null 2>&1 || true
+
     # shellcheck disable=SC2086
     timeout "${SBOX_STEAMCMD_TIMEOUT:-600}" "${STEAMCMD_DIR}/steamcmd.sh" \
         +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \

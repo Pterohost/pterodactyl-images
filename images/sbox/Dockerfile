@@ -45,19 +45,23 @@ RUN dpkg --add-architecture i386 \
     && useradd -m -d /home/container -s /bin/bash container \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
 
-# SteamCMD into /opt (writable by the container user so it can self-update).
+# SteamCMD into /opt. Wings runs the game container as its own uid (e.g. 998),
+# not the image's `container` user, and SteamCMD self-updates into its own dir -
+# so make the tree world-rwx so any runtime uid can exec and write it.
 RUN mkdir -p /opt/steamcmd \
     && curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
        | tar -xz -C /opt/steamcmd \
-    && chown -R container:container /opt/steamcmd
+    && chmod -R 0777 /opt/steamcmd
 
 # Windows x64 .NET runtime for the server (run under Wine), pointed to by
-# DOTNET_ROOT=Z:\opt\sbox-dotnet at launch.
+# DOTNET_ROOT=Z:\opt\sbox-dotnet at launch. World-readable/traversable so any
+# runtime uid can load the framework.
 RUN mkdir -p /opt/sbox-dotnet \
     && curl -fsSL "${DOTNET_WIN_URL}" -o /tmp/dotnet-win.zip \
     && unzip -q /tmp/dotnet-win.zip -d /opt/sbox-dotnet \
     && rm -f /tmp/dotnet-win.zip \
-    && test -d /opt/sbox-dotnet/shared/Microsoft.NETCore.App
+    && test -d /opt/sbox-dotnet/shared/Microsoft.NETCore.App \
+    && chmod -R a+rX /opt/sbox-dotnet
 
 ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 LANGUAGE=en_US.UTF-8 \
     USER=container HOME=/home/container \
