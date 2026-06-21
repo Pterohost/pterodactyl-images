@@ -18,12 +18,28 @@
 set -u
 
 APPID=1892930
-STEAMCMD_DIR="${STEAMCMD_DIR:-/opt/steamcmd}"
+STEAMCMD_SRC="${STEAMCMD_DIR:-/opt/steamcmd}"
+# Wings runs the container with a read-only root filesystem; SteamCMD self-updates
+# into its own directory, so it cannot run from the image's /opt. Run it from a
+# writable copy inside the (persistent) server volume instead.
+STEAMCMD_DIR="/home/container/.steamcmd"
 INSTALL_DIR="/home/container/sbox"
 RUNTIME_MODE="${RUNTIME_MODE:-wine}"
 
 cd /home/container || { echo "[sbox] FATAL: cannot cd /home/container"; exit 1; }
 mkdir -p "${INSTALL_DIR}"
+
+# Wings gives the container only a small (~100 MB) /tmp tmpfs, but SteamCMD stages
+# far more than that during app config/download and fails with "Missing
+# configuration" when /tmp fills. Point TMPDIR at the (large) server volume.
+export TMPDIR="/home/container/.tmp"
+mkdir -p "${TMPDIR}"
+
+# Seed the writable SteamCMD copy on first boot (idempotent).
+if [ ! -x "${STEAMCMD_DIR}/steamcmd.sh" ]; then
+    mkdir -p "${STEAMCMD_DIR}"
+    cp -a "${STEAMCMD_SRC}/." "${STEAMCMD_DIR}/" 2>/dev/null || true
+fi
 
 # Runtime decides which Steam depot to pull: wine/proton need the Windows build,
 # native linux needs the (not-yet-available) Linux build.
@@ -40,20 +56,31 @@ if [ "${SBOX_AUTO_UPDATE:-1}" = "1" ]; then
     branch_args=()
     [ -n "${SBOX_BRANCH:-}" ] && branch_args=(-beta "${SBOX_BRANCH}")
 
-    # On first run SteamCMD self-updates and restarts itself, which drops the
-    # forced platform type and makes the real app_update fail with "Missing
-    # configuration". Do that self-update in a throwaway pass first.
+    # First run self-updates SteamCMD (and restarts it); do that in a throwaway
+    # pass so the real update starts from a settled SteamCMD.
     "${STEAMCMD_DIR}/steamcmd.sh" +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 +quit >/dev/null 2>&1 || true
 
-    # shellcheck disable=SC2086
-    timeout "${SBOX_STEAMCMD_TIMEOUT:-600}" "${STEAMCMD_DIR}/steamcmd.sh" \
-        +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
-        +@sSteamCmdForcePlatformType "${STEAM_PLATFORM}" \
-        +force_install_dir "${INSTALL_DIR}" \
-        +login anonymous \
-        +app_update "${APPID}" "${branch_args[@]}" ${STEAMCMD_EXTRA_ARGS:-} validate \
-        +quit \
-        || echo "[sbox] WARN: SteamCMD update failed/timed out - continuing with existing files."
+    # app_update for 1892930 intermittently fails with "Missing configuration"
+    # (a transient Steam backend hiccup), so retry until the binary lands.
+    sbox_present() { find "${INSTALL_DIR}" -maxdepth 4 -type f \( -name 'sbox-server.exe' -o -name 'sbox-server' \) 2>/dev/null | grep -q .; }
+    attempt=1
+    max_attempts=4
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        echo "[sbox] SteamCMD attempt ${attempt}/${max_attempts}..."
+        # shellcheck disable=SC2086
+        timeout "${SBOX_STEAMCMD_TIMEOUT:-600}" "${STEAMCMD_DIR}/steamcmd.sh" \
+            +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
+            +@sSteamCmdForcePlatformType "${STEAM_PLATFORM}" \
+            +force_install_dir "${INSTALL_DIR}" \
+            +login anonymous \
+            +app_update "${APPID}" "${branch_args[@]}" ${STEAMCMD_EXTRA_ARGS:-} validate \
+            +quit || true
+        sbox_present && { echo "[sbox] SteamCMD update OK."; break; }
+        echo "[sbox] attempt ${attempt} did not produce the server binary (transient 'Missing configuration'?); retrying..."
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+    sbox_present || echo "[sbox] WARN: SteamCMD did not produce the binary after ${max_attempts} attempts - continuing with existing files."
 else
     echo "[sbox] SBOX_AUTO_UPDATE=0 - skipping SteamCMD, using existing server files."
 fi
