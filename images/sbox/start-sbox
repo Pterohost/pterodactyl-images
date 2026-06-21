@@ -1,0 +1,88 @@
+#!/bin/bash
+# Pterohost s&box bootstrap.
+#
+# Invoked via the shared entrypoint (Wings STARTUP="start-sbox" -> eval exec
+# start-sbox). Updates the dedicated server through SteamCMD, wires up the
+# Steam client SDK, normalizes Facepunch's CRLF scripts, then exec's the
+# native Linux server so signals reach it via tini.
+#
+# Env (supplied by the Pterodactyl egg / Wings):
+#   GAME                  game package ident, e.g. facepunch.sandbox
+#   MAP                   optional map package ident (positional after +game)
+#   SERVER_NAME           +hostname value
+#   SERVER_PORT           primary allocation port (auto-injected by Wings)
+#   QUERY_PORT            +net_query_port (defaults to SERVER_PORT)
+#   TOKEN                 optional Steam game server token
+#   SBOX_AUTO_UPDATE      1 = SteamCMD validate on boot (default 1)
+#   SBOX_BRANCH           optional Steam beta branch (e.g. staging)
+#   SBOX_STEAMCMD_TIMEOUT max seconds for the SteamCMD step (default 600)
+#   STEAMCMD_EXTRA_ARGS   extra raw SteamCMD args
+#   SBOX_EXTRA_ARGS       extra raw server args appended last
+set -u
+
+APPID=1892930
+STEAMCMD_DIR="${STEAMCMD_DIR:-/opt/steamcmd}"
+INSTALL_DIR="/home/container"
+
+cd "${INSTALL_DIR}" || { echo "[sbox] FATAL: cannot cd ${INSTALL_DIR}"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# 1. Update / validate the dedicated server via anonymous SteamCMD.
+# ---------------------------------------------------------------------------
+if [ "${SBOX_AUTO_UPDATE:-1}" = "1" ]; then
+    echo "[sbox] Updating dedicated server (app ${APPID})${SBOX_BRANCH:+, branch ${SBOX_BRANCH}}..."
+    branch_args=()
+    [ -n "${SBOX_BRANCH:-}" ] && branch_args=(-beta "${SBOX_BRANCH}")
+
+    # shellcheck disable=SC2086
+    timeout "${SBOX_STEAMCMD_TIMEOUT:-600}" "${STEAMCMD_DIR}/steamcmd.sh" \
+        +force_install_dir "${INSTALL_DIR}" \
+        +login anonymous \
+        +app_update "${APPID}" "${branch_args[@]}" ${STEAMCMD_EXTRA_ARGS:-} validate \
+        +quit \
+        || echo "[sbox] WARN: SteamCMD update failed/timed out - continuing with existing files."
+else
+    echo "[sbox] SBOX_AUTO_UPDATE=0 - skipping SteamCMD, using existing server files."
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Steam client SDK symlink - required before Steamworks initializes.
+# ---------------------------------------------------------------------------
+mkdir -p "${HOME}/.steam/sdk64" "${HOME}/.steam/sdk32"
+ln -sf "${STEAMCMD_DIR}/linux64/steamclient.so" "${HOME}/.steam/sdk64/steamclient.so"
+ln -sf "${STEAMCMD_DIR}/linux32/steamclient.so" "${HOME}/.steam/sdk32/steamclient.so" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 3. Normalize CRLF in any shell scripts Facepunch ships (issue #10706).
+# ---------------------------------------------------------------------------
+find "${INSTALL_DIR}" -maxdepth 4 -type f -name '*.sh' -print0 2>/dev/null \
+    | xargs -0 -r sed -i 's/\r$//' 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 4. Locate the server binary (native ELF; the .exe name is historical).
+# ---------------------------------------------------------------------------
+BIN="$(find "${INSTALL_DIR}" -maxdepth 5 -type f \
+        \( -name 'sbox-server' -o -name 'sbox-server.exe' \) 2>/dev/null | head -n1)"
+
+if [ -z "${BIN}" ]; then
+    echo "[sbox] ERROR: server binary not found under ${INSTALL_DIR}."
+    echo "[sbox] SteamCMD may have failed - check the log above (Steam branch, disk space, network)."
+    exit 1
+fi
+chmod +x "${BIN}" 2>/dev/null || true
+cd "$(dirname "${BIN}")" || { echo "[sbox] FATAL: cannot cd server dir"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# 5. Assemble launch arguments.
+# ---------------------------------------------------------------------------
+ARGS=( +game "${GAME:-facepunch.sandbox}" )
+[ -n "${MAP:-}" ]    && ARGS+=( "${MAP}" )
+ARGS+=( +hostname "${SERVER_NAME:-Pterohost s&box Server}" )
+ARGS+=( +port "${SERVER_PORT:-27015}" )
+ARGS+=( +net_query_port "${QUERY_PORT:-${SERVER_PORT:-27015}}" )
+[ -n "${TOKEN:-}" ]  && ARGS+=( +net_game_server_token "${TOKEN}" )
+
+echo "[sbox] Launching: $(basename "${BIN}") ${ARGS[*]} ${SBOX_EXTRA_ARGS:-}"
+
+# shellcheck disable=SC2086
+exec "${BIN}" "${ARGS[@]}" ${SBOX_EXTRA_ARGS:-}

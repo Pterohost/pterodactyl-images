@@ -28,6 +28,18 @@ License: MIT
 
 > A `java_26_ea_graalvm` tag will be added once GraalVM CE publishes a 26 dev image.
 
+### Game-server tags
+
+| Tag | Runtime | Base | Arch | Notes |
+|---|---|---|---|---|
+| `sbox` | s&box dedicated server (SteamCMD + .NET, native Linux) | ubuntu:24.04 | amd64 | Steam app `1892930`, anonymous SteamCMD. See below. |
+
+The `sbox` tag bundles SteamCMD and the .NET runtime and ships a `start-sbox`
+bootstrap (downloads/validates the server into `/home/container`, symlinks the
+Steam client SDK, strips CRLF from Facepunch scripts, then launches the native
+Linux server). Use it with a Pterodactyl egg whose startup command is
+`start-sbox`. amd64 only - s&box has no ARM server build.
+
 All tags are multi-arch manifest lists - `docker pull` selects the right layer automatically.
 Tags are also published with the commit SHA suffix (`:<tag>-<sha>`) for pinning.
 
@@ -73,6 +85,7 @@ Pterohost Java 21 (Gen ZGC)|ghcr.io/pterohost/pterodactyl-images:java_21
 Pterohost Java 21 GraalVM CE|ghcr.io/pterohost/pterodactyl-images:java_21_graalvm
 Pterohost Java 25 LTS (Gen ZGC)|ghcr.io/pterohost/pterodactyl-images:java_25
 Pterohost Java 25 GraalVM CE|ghcr.io/pterohost/pterodactyl-images:java_25_graalvm
+Pterohost s&box (native Linux)|ghcr.io/pterohost/pterodactyl-images:sbox
 ```
 
 Bulk replacement of legacy tags in the `eggs.docker_images` JSON column can be done via a single
