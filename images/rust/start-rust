@@ -1,0 +1,241 @@
+#!/bin/bash
+# Pterohost Rust bootstrap.
+#
+# Invoked via the shared entrypoint (Wings STARTUP="start-rust" -> eval exec
+# start-rust). Updates RustDedicated via anonymous SteamCMD, installs/updates the
+# selected modding framework deterministically, then launches the server.
+#
+# This script OWNS all the logic the old third-party image hid. Every network
+# step is non-fatal (log + continue, never exit 1) so a transient CDN hiccup can
+# never leave a customer's server refusing to boot - the exact failure mode of
+# the old Chaos-extension 406 that killed the container.
+#
+# Env (from the Pterodactyl egg / Wings), with sane fallbacks:
+#   MODDING_FRAMEWORK  vanilla | oxide | carbon        (default: oxide)
+#   STEAM_BRANCH       public | staging | aux01 | aux02 (default: public)
+#   FRAMEWORK_UPDATE   1 = re-pull framework each boot, 0 = only if missing
+#   AUTO_UPDATE        1 = SteamCMD app_update each boot, 0 = skip
+#   VALIDATE           1 = SteamCMD validate, 0 = skip
+#   USE_JEMALLOC       1 = LD_PRELOAD jemalloc (default), 0 = disable
+#   CHAOS_DL / DISCORD_EXT / RUSTEDIT_EXT  1 = fetch that Oxide extension
+#   TICKRATE, FPS_LIMIT, GC_BUFFER         performance knobs
+#   SERVER_PORT (Wings), QUERY_PORT, RCON_PORT, RCON_PASS, APP_PORT,
+#   SERVER_IDENTITY, HOSTNAME, DESCRIPTION, SERVER_URL, SERVER_IMG, SERVER_LOGO,
+#   MAX_PLAYERS, SAVEINTERVAL, GAMEMODE, WORLD_SIZE, WORLD_SEED, LEVEL, MAP_URL,
+#   SERVER_TAGS, APP_PUBLIC_IP, ADDITIONAL_ARGS
+set -u
+
+APPID=258550
+STEAMCMD_SRC="${STEAMCMD_DIR:-/opt/steamcmd}"
+# Wings mounts the container root read-only; SteamCMD self-updates into its own
+# directory, so run it from a writable copy inside the (persistent) server volume.
+STEAMCMD_RUN="/home/container/.steamcmd"
+JEMALLOC_LIB="${JEMALLOC_LIB:-/usr/lib/x86_64-linux-gnu/libjemalloc.so.2}"
+
+FRAMEWORK="$(echo "${MODDING_FRAMEWORK:-oxide}" | tr '[:upper:]' '[:lower:]')"
+BRANCH="$(echo "${STEAM_BRANCH:-public}" | tr '[:upper:]' '[:lower:]')"
+
+log() { printf '[rust] %s\n' "$*"; }
+
+cd /home/container || { log "FATAL: cannot cd /home/container"; exit 1; }
+
+# Wings gives the container a small (~100 MB) /tmp tmpfs; SteamCMD stages far more
+# than that and fails with "Missing configuration" when /tmp fills. Point TMPDIR
+# at the large server volume instead.
+export TMPDIR="/home/container/.tmp"
+mkdir -p "${TMPDIR}"
+
+# ---------------------------------------------------------------------------
+# 1. Update / validate RustDedicated via anonymous SteamCMD.
+# ---------------------------------------------------------------------------
+if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+    # Seed the writable SteamCMD copy on first boot (idempotent).
+    if [ ! -x "${STEAMCMD_RUN}/steamcmd.sh" ]; then
+        mkdir -p "${STEAMCMD_RUN}"
+        cp -a "${STEAMCMD_SRC}/." "${STEAMCMD_RUN}/" 2>/dev/null || true
+    fi
+    mkdir -p /home/container/steamapps  # avoids a spurious steamcmd disk-write error
+
+    branch_args=()
+    case "${BRANCH}" in
+        public|"") ;;                              # default branch: no -beta
+        *) branch_args=(-beta "${BRANCH}") ;;
+    esac
+    validate_arg=(); [ "${VALIDATE:-1}" = "1" ] && validate_arg=(validate)
+
+    log "Updating RustDedicated (app ${APPID}${BRANCH:+, branch ${BRANCH}})..."
+    # First run self-updates SteamCMD (and restarts it); do it in a throwaway pass
+    # so the real update starts from a settled SteamCMD.
+    "${STEAMCMD_RUN}/steamcmd.sh" +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 +quit >/dev/null 2>&1 || true
+
+    rust_present() { [ -x /home/container/RustDedicated ]; }
+    attempt=1; max_attempts=3
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        log "SteamCMD attempt ${attempt}/${max_attempts}..."
+        timeout "${STEAMCMD_TIMEOUT:-1800}" "${STEAMCMD_RUN}/steamcmd.sh" \
+            +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
+            +force_install_dir /home/container \
+            +login anonymous \
+            +app_update "${APPID}" "${branch_args[@]}" "${validate_arg[@]}" \
+            +quit || true
+        rust_present && { log "SteamCMD update OK."; break; }
+        log "attempt ${attempt} did not produce RustDedicated (transient?); retrying..."
+        attempt=$((attempt + 1)); sleep 5
+    done
+    rust_present || log "WARN: RustDedicated missing after ${max_attempts} attempts - continuing with existing files."
+else
+    log "AUTO_UPDATE=0 - skipping SteamCMD, using existing server files."
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Steam client SDK - required before Steamworks (server browser) initialises.
+# ---------------------------------------------------------------------------
+mkdir -p "${HOME}/.steam/sdk32" "${HOME}/.steam/sdk64"
+[ -f "${STEAMCMD_RUN}/linux32/steamclient.so" ] && ln -sf "${STEAMCMD_RUN}/linux32/steamclient.so" "${HOME}/.steam/sdk32/steamclient.so"
+[ -f "${STEAMCMD_RUN}/linux64/steamclient.so" ] && ln -sf "${STEAMCMD_RUN}/linux64/steamclient.so" "${HOME}/.steam/sdk64/steamclient.so"
+
+# ---------------------------------------------------------------------------
+# 3. Modding framework install / update.
+#    Applied AFTER the Steam update, because `validate` restores the original
+#    game assemblies and would otherwise undo an Oxide patch.
+# ---------------------------------------------------------------------------
+fw_should_update() { [ "${FRAMEWORK_UPDATE:-1}" = "1" ]; }
+
+install_oxide() {
+    if [ -d /home/container/oxide ] && ! fw_should_update; then
+        log "Oxide present and FRAMEWORK_UPDATE=0 - keeping existing install."; return 0
+    fi
+    local url="https://github.com/OxideMod/Oxide.Rust/releases/latest/download/Oxide.Rust-linux.zip"
+    log "Installing/updating Oxide (uMod) from ${url}"
+    if curl -fsSL --retry 3 --max-time 300 -o "${TMPDIR}/oxide.zip" "${url}"; then
+        unzip -oq "${TMPDIR}/oxide.zip" -d /home/container && log "Oxide applied." \
+            || log "WARN: Oxide unzip failed - continuing (server will run vanilla)."
+        rm -f "${TMPDIR}/oxide.zip"
+    else
+        log "WARN: Oxide download failed - continuing with existing files."
+    fi
+    mkdir -p /home/container/oxide/plugins
+}
+
+install_carbon() {
+    if [ -d /home/container/carbon ] && ! fw_should_update; then
+        log "Carbon present and FRAMEWORK_UPDATE=0 - keeping existing install."; return 0
+    fi
+    # Carbon publishes rolling release tags; map the Steam branch onto its channel.
+    local tag="production_build"
+    case "${BRANCH}" in *staging*) tag="rustbeta_staging_build" ;; esac
+    local url="https://github.com/CarbonCommunity/Carbon.Core/releases/download/${tag}/Carbon.Linux.Release.tar.gz"
+    log "Installing/updating Carbon (${tag}) from ${url}"
+    if curl -fsSL --retry 3 --max-time 300 -o "${TMPDIR}/carbon.tar.gz" "${url}"; then
+        tar -xzf "${TMPDIR}/carbon.tar.gz" -C /home/container && log "Carbon extracted." \
+            || log "WARN: Carbon extract failed - continuing (server will run vanilla)."
+        rm -f "${TMPDIR}/carbon.tar.gz"
+    else
+        log "WARN: Carbon download failed - continuing with existing files."
+    fi
+    mkdir -p /home/container/carbon/plugins /home/container/carbon/extensions
+}
+
+# Where Oxide-style extension DLLs go for the active framework.
+managed_dir() {
+    if [ "${FRAMEWORK}" = "carbon" ]; then echo "/home/container/carbon/extensions";
+    else echo "/home/container/RustDedicated_Data/Managed"; fi
+}
+
+fetch_ext() { # <flag_value> <name> <url>
+    [ "${1:-0}" = "1" ] || return 0
+    local name="$2" url="$3" dir; dir="$(managed_dir)"
+    mkdir -p "${dir}"
+    log "Fetching extension ${name}..."
+    curl -fsSL --retry 2 --max-time 180 -o "${dir}/${name}" "${url}" \
+        && log "  ${name} OK" \
+        || log "  WARN: ${name} download failed (${url}) - continuing without it."
+}
+
+CARBON_PRELOAD=""
+case "${FRAMEWORK}" in
+    oxide)
+        install_oxide
+        ;;
+    carbon)
+        install_carbon
+        # Carbon boots via a Unity doorstop preload. Prefer its shipped env file;
+        # otherwise detect the native lib + preloader so we survive layout changes.
+        if [ -f /home/container/carbon/tools/environment ]; then
+            # shellcheck disable=SC1091
+            source /home/container/carbon/tools/environment || true
+        fi
+        : "${DOORSTOP_ENABLED:=1}"; export DOORSTOP_ENABLED
+        if [ -z "${DOORSTOP_TARGET_ASSEMBLY:-}" ]; then
+            pl="$(find /home/container/carbon -maxdepth 3 -name 'Carbon.Preloader.dll' 2>/dev/null | head -1)"
+            [ -n "${pl}" ] && export DOORSTOP_TARGET_ASSEMBLY="${pl}"
+        fi
+        ds="$(find /home/container/carbon -maxdepth 3 -name 'libdoorstop*.so' 2>/dev/null | head -1)"
+        [ -n "${ds}" ] && CARBON_PRELOAD="${ds}" && export LD_LIBRARY_PATH="$(dirname "${ds}"):${LD_LIBRARY_PATH:-}"
+        ;;
+    vanilla)
+        log "Framework: vanilla (no mod loader)."
+        ;;
+    *)
+        log "WARN: unknown MODDING_FRAMEWORK='${FRAMEWORK}', defaulting to oxide."
+        FRAMEWORK="oxide"; install_oxide
+        ;;
+esac
+
+# Optional Oxide extensions (guarded; only meaningful for oxide/carbon).
+if [ "${FRAMEWORK}" != "vanilla" ]; then
+    fetch_ext "${CHAOS_DL:-0}"     "Oxide.Ext.Chaos.dll"   "https://oxide.chaoscode.io/Oxide.Ext.Chaos.dll"
+    fetch_ext "${DISCORD_EXT:-0}"  "Oxide.Ext.Discord.dll" "https://github.com/dassjosh/Oxide.Ext.Discord/releases/latest/download/Oxide.Ext.Discord.dll"
+    fetch_ext "${RUSTEDIT_EXT:-0}" "Oxide.Ext.RustEdit.dll" "https://github.com/k1lly0u/Oxide.Ext.RustEdit/raw/master/Oxide.Ext.RustEdit.dll"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Performance: preload jemalloc (cuts Rust's memory fragmentation / GC stalls
+#    - the structural lag fix) alongside Carbon's doorstop when present.
+# ---------------------------------------------------------------------------
+PRELOAD=""
+if [ "${USE_JEMALLOC:-1}" = "1" ] && [ -f "${JEMALLOC_LIB}" ]; then
+    PRELOAD="${JEMALLOC_LIB}"
+    log "jemalloc allocator enabled."
+fi
+[ -n "${CARBON_PRELOAD}" ] && PRELOAD="${PRELOAD:+${PRELOAD}:}${CARBON_PRELOAD}"
+[ -n "${PRELOAD}" ] && export LD_PRELOAD="${PRELOAD}${LD_PRELOAD:+:${LD_PRELOAD}}"
+
+# ---------------------------------------------------------------------------
+# 5. Assemble RustDedicated launch arguments from the environment.
+# ---------------------------------------------------------------------------
+ARGS=(-batchmode -nographics)
+ARGS+=(+server.port "${SERVER_PORT:-28015}")
+ARGS+=(+server.queryport "${QUERY_PORT:-${SERVER_PORT:-28015}}")
+ARGS+=(+server.identity "${SERVER_IDENTITY:-rust}")
+ARGS+=(+server.hostname "${HOSTNAME:-A Rust Server}")
+ARGS+=(+server.description "${DESCRIPTION:-Powered by Pterohost}")
+ARGS+=(+server.maxplayers "${MAX_PLAYERS:-40}")
+ARGS+=(+server.saveinterval "${SAVEINTERVAL:-60}")
+ARGS+=(+server.tickrate "${TICKRATE:-30}")
+[ -n "${GAMEMODE:-}" ]    && ARGS+=(+server.gamemode "${GAMEMODE}")
+[ -n "${SERVER_URL:-}" ]  && ARGS+=(+server.url "${SERVER_URL}")
+[ -n "${SERVER_IMG:-}" ]  && ARGS+=(+server.headerimage "${SERVER_IMG}")
+[ -n "${SERVER_LOGO:-}" ] && ARGS+=(+server.logoimage "${SERVER_LOGO}")
+[ -n "${SERVER_TAGS:-}" ] && ARGS+=(+server.tags "${SERVER_TAGS}")
+ARGS+=(+rcon.port "${RCON_PORT:-28016}")
+ARGS+=(+rcon.password "${RCON_PASS:-}")
+ARGS+=(+rcon.web true)
+ARGS+=(+app.port "${APP_PORT:-28082}")
+[ -n "${APP_PUBLIC_IP:-}" ] && ARGS+=(+app.publicip "${APP_PUBLIC_IP}")
+[ "${FPS_LIMIT:-0}" != "0" ] && ARGS+=(+fps.limit "${FPS_LIMIT}")
+[ -n "${GC_BUFFER:-}" ]      && ARGS+=(+gc.buffer "${GC_BUFFER}")
+
+# Map: custom .map URL wins; otherwise procedural (level + worldsize + seed).
+if [ -n "${MAP_URL:-}" ]; then
+    ARGS+=(+server.levelurl "${MAP_URL}")
+else
+    ARGS+=(+server.level "${LEVEL:-Procedural Map}")
+    ARGS+=(+server.worldsize "${WORLD_SIZE:-3000}")
+    ARGS+=(+server.seed "${WORLD_SEED:-1234}")
+fi
+
+log "framework=${FRAMEWORK} branch=${BRANCH} launching RustDedicated"
+# exec so tini forwards SIGTERM/SIGINT straight to the server for a clean save.
+# shellcheck disable=SC2086
+exec ./RustDedicated "${ARGS[@]}" ${ADDITIONAL_ARGS:-}
