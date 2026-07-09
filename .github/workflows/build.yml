@@ -60,6 +60,10 @@ jobs:
             dir: sbox
             # s&box's native Linux dedicated server is x86-64 only.
             platforms: linux/amd64
+          - tag: rust
+            dir: rust
+            # RustDedicated ships no arm64 depot.
+            platforms: linux/amd64
 
     steps:
       - name: Checkout
