@@ -159,19 +159,23 @@ case "${FRAMEWORK}" in
         ;;
     carbon)
         install_carbon
-        # Carbon boots via a Unity doorstop preload. Prefer its shipped env file;
-        # otherwise detect the native lib + preloader so we survive layout changes.
-        if [ -f /home/container/carbon/tools/environment ]; then
+        # Carbon boots via a Unity doorstop preload. Its release ships the
+        # authoritative env file (carbon/tools/environment.sh) which exports
+        # DOORSTOP_* + LD_LIBRARY_PATH and sets LD_PRELOAD to the root-level
+        # libdoorstop.so. Source it; fall back to the known layout if absent.
+        if [ -f /home/container/carbon/tools/environment.sh ]; then
             # shellcheck disable=SC1091
-            source /home/container/carbon/tools/environment || true
+            source /home/container/carbon/tools/environment.sh || true
+        else
+            export DOORSTOP_ENABLED=1
+            export DOORSTOP_TARGET_ASSEMBLY="/home/container/carbon/managed/Carbon.Preloader.dll"
+            export LD_LIBRARY_PATH="/home/container:/home/container/RustDedicated_Data/Plugins/x86_64:${LD_LIBRARY_PATH:-}"
+            [ -f /home/container/libdoorstop.so ] && export LD_PRELOAD="/home/container/libdoorstop.so"
         fi
-        : "${DOORSTOP_ENABLED:=1}"; export DOORSTOP_ENABLED
-        if [ -z "${DOORSTOP_TARGET_ASSEMBLY:-}" ]; then
-            pl="$(find /home/container/carbon -maxdepth 3 -name 'Carbon.Preloader.dll' 2>/dev/null | head -1)"
-            [ -n "${pl}" ] && export DOORSTOP_TARGET_ASSEMBLY="${pl}"
-        fi
-        ds="$(find /home/container/carbon -maxdepth 3 -name 'libdoorstop*.so' 2>/dev/null | head -1)"
-        [ -n "${ds}" ] && CARBON_PRELOAD="${ds}" && export LD_LIBRARY_PATH="$(dirname "${ds}"):${LD_LIBRARY_PATH:-}"
+        # Capture the doorstop preloader and clear LD_PRELOAD so the performance
+        # section below rebuilds it as "jemalloc:libdoorstop" without duplication.
+        CARBON_PRELOAD="${LD_PRELOAD:-}"
+        unset LD_PRELOAD
         ;;
     vanilla)
         log "Framework: vanilla (no mod loader)."
