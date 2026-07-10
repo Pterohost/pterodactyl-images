@@ -254,7 +254,20 @@ ARGS+=(+rcon.port "${RCON_PORT:-28016}")
 ARGS+=(+rcon.password "${RCON_PASS:-}")
 ARGS+=(+rcon.web true)
 ARGS+=(+app.port "${APP_PORT:-28082}")
-[ -n "${APP_PUBLIC_IP:-}" ] && ARGS+=(+app.publicip "${APP_PUBLIC_IP}")
+# Rust+ companion needs a PUBLIC IPv4. If APP_PUBLIC_IP is unset or a private
+# address (a stale internal value from the panel allocator), auto-detect the
+# node's public IPv4 - curl -4 forces IPv4 (Facepunch's connectivity test is
+# IPv4-only and fails on an IPv6 auto-detect).
+PUBIP="${APP_PUBLIC_IP:-}"
+case "${PUBIP}" in
+    ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|127.*|169.254.*)
+        PUBIP="$(curl -4 -s --max-time 10 https://api.ipify.org 2>/dev/null || curl -4 -s --max-time 10 https://ifconfig.me 2>/dev/null || echo '')"
+        ;;
+esac
+case "${PUBIP}" in
+    ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|127.*|169.254.*) ;;
+    *) ARGS+=(+app.publicip "${PUBIP}") ;;
+esac
 [ "${FPS_LIMIT:-0}" != "0" ] && ARGS+=(+fps.limit "${FPS_LIMIT}")
 [ -n "${GC_BUFFER:-}" ]      && ARGS+=(+gc.buffer "${GC_BUFFER}")
 
