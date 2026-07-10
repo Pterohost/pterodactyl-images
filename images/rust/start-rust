@@ -16,7 +16,8 @@
 #   FRAMEWORK_UPDATE   1 = re-pull framework each boot, 0 = only if missing
 #   AUTO_UPDATE        1 = SteamCMD app_update each boot, 0 = skip
 #   VALIDATE           1 = SteamCMD validate, 0 = skip
-#   USE_JEMALLOC       1 = LD_PRELOAD jemalloc (default), 0 = disable
+#   USE_JEMALLOC       1 = LD_PRELOAD jemalloc (default 0; ignored for Oxide - it
+#                      crashes Oxide's compiler; safe only for vanilla/Carbon)
 #   CHAOS_DL / DISCORD_EXT / RUSTEDIT_EXT  1 = fetch that Oxide extension
 #   TICKRATE, FPS_LIMIT, GC_BUFFER         performance knobs
 #   SERVER_PORT (Wings), QUERY_PORT, RCON_PORT, RCON_PASS, APP_PORT,
@@ -45,10 +46,25 @@ cd /home/container || { log "FATAL: cannot cd /home/container"; exit 1; }
 export TMPDIR="/home/container/.tmp"
 mkdir -p "${TMPDIR}"
 
+# Detect a framework switch. Oxide PATCHES the game's Assembly-CSharp.dll (adds an
+# IPlayer field bound to Oxide.Core), so switching to Carbon/vanilla with those
+# assemblies in place crashes with "Could not load Oxide.Core". A plain validate
+# will not help (SteamCMD reports "up to date"), so we DELETE the Oxide-patched
+# assemblies and let a forced validate re-download the vanilla ones.
+LAST_FW_FILE="/home/container/.pterohost_framework"
+LAST_FW="$(cat "${LAST_FW_FILE}" 2>/dev/null || echo '')"
+MANAGED_DIR="/home/container/RustDedicated_Data/Managed"
+FORCE_VALIDATE=0
+if [ "${FRAMEWORK}" != "oxide" ] && { [ "${LAST_FW}" = "oxide" ] || ls "${MANAGED_DIR}"/Oxide.*.dll >/dev/null 2>&1; }; then
+    log "Switching away from Oxide -> removing Oxide-patched assemblies; SteamCMD will restore vanilla ones."
+    rm -f "${MANAGED_DIR}"/Assembly-CSharp.dll "${MANAGED_DIR}"/Oxide.*.dll "${MANAGED_DIR}"/Oxide.References.dll.config 2>/dev/null || true
+    FORCE_VALIDATE=1
+fi
+
 # ---------------------------------------------------------------------------
 # 1. Update / validate RustDedicated via anonymous SteamCMD.
 # ---------------------------------------------------------------------------
-if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+if [ "${AUTO_UPDATE:-1}" = "1" ] || [ "${FORCE_VALIDATE}" = "1" ]; then
     # Seed the writable SteamCMD copy on first boot (idempotent).
     if [ ! -x "${STEAMCMD_RUN}/steamcmd.sh" ]; then
         mkdir -p "${STEAMCMD_RUN}"
@@ -61,7 +77,8 @@ if [ "${AUTO_UPDATE:-1}" = "1" ]; then
         public|"") ;;                              # default branch: no -beta
         *) branch_args=(-beta "${BRANCH}") ;;
     esac
-    validate_arg=(); [ "${VALIDATE:-1}" = "1" ] && validate_arg=(validate)
+    validate_arg=()
+    { [ "${VALIDATE:-1}" = "1" ] || [ "${FORCE_VALIDATE}" = "1" ]; } && validate_arg=(validate)
 
     log "Updating RustDedicated (app ${APPID}${BRANCH:+, branch ${BRANCH}})..."
     # First run self-updates SteamCMD (and restarts it); do it in a throwaway pass
@@ -193,14 +210,25 @@ if [ "${FRAMEWORK}" != "vanilla" ]; then
     fetch_ext "${RUSTEDIT_EXT:-0}" "Oxide.Ext.RustEdit.dll" "https://github.com/k1lly0u/Oxide.Ext.RustEdit/raw/master/Oxide.Ext.RustEdit.dll"
 fi
 
+# Record the active framework so the next boot can detect an oxide -> carbon/vanilla
+# switch and restore vanilla assemblies (see FORCE_VALIDATE above).
+echo "${FRAMEWORK}" > "${LAST_FW_FILE}" 2>/dev/null || true
+
 # ---------------------------------------------------------------------------
-# 4. Performance: preload jemalloc (cuts Rust's memory fragmentation / GC stalls
-#    - the structural lag fix) alongside Carbon's doorstop when present.
+# 4. Performance: optionally preload jemalloc alongside Carbon's doorstop.
+#    jemalloc cuts Rust's memory fragmentation, BUT preloading it corrupts the
+#    heap inside RustDedicated's bundled Mono.Posix string marshaling and crashes
+#    Oxide's C# compiler ("free(): invalid size" in Mono.Unix FileNameMarshaler).
+#    So it is OFF by default and force-skipped for Oxide even if requested.
 # ---------------------------------------------------------------------------
 PRELOAD=""
-if [ "${USE_JEMALLOC:-1}" = "1" ] && [ -f "${JEMALLOC_LIB}" ]; then
-    PRELOAD="${JEMALLOC_LIB}"
-    log "jemalloc allocator enabled."
+if [ "${USE_JEMALLOC:-0}" = "1" ] && [ -f "${JEMALLOC_LIB}" ]; then
+    if [ "${FRAMEWORK}" = "oxide" ]; then
+        log "jemalloc requested but skipped for Oxide (incompatible with Oxide's compiler)."
+    else
+        PRELOAD="${JEMALLOC_LIB}"
+        log "jemalloc allocator enabled."
+    fi
 fi
 [ -n "${CARBON_PRELOAD}" ] && PRELOAD="${PRELOAD:+${PRELOAD}:}${CARBON_PRELOAD}"
 [ -n "${PRELOAD}" ] && export LD_PRELOAD="${PRELOAD}${LD_PRELOAD:+:${LD_PRELOAD}}"
