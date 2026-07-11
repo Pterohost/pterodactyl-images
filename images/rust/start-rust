@@ -20,6 +20,7 @@
 #                      crashes Oxide's compiler; safe only for vanilla/Carbon)
 #   CHAOS_DL / DISCORD_EXT / RUSTEDIT_EXT  1 = fetch that Oxide extension
 #   TICKRATE, FPS_LIMIT, GC_BUFFER         performance knobs
+#   RCON_REPLY_WINDOW  seconds to wait for a console command's RCON reply (5)
 #   SERVER_PORT (Wings), QUERY_PORT, RCON_PORT, RCON_PASS, APP_PORT,
 #   SERVER_IDENTITY, HOSTNAME, DESCRIPTION, SERVER_URL, SERVER_IMG, SERVER_LOGO,
 #   MAX_PLAYERS, SAVEINTERVAL, GAMEMODE, WORLD_SIZE, WORLD_SEED, LEVEL, MAP_URL,
@@ -280,7 +281,67 @@ else
     ARGS+=(+server.seed "${WORLD_SEED:-1234}")
 fi
 
+# ---------------------------------------------------------------------------
+# 6. Launch RustDedicated + panel-console bridge.
+#    RustDedicated does NOT read stdin, but stdin is exactly where Wings
+#    delivers panel-console input (including the egg stop command "quit"), so
+#    without a bridge the console silently ignores every command. Forward each
+#    stdin line to the server's local WebRCON endpoint (rcon.web is always on,
+#    see ARGS above) and echo the direct reply back to stdout so it shows up in
+#    the panel. Broadcast RCON messages (Identifier 0) are skipped - the server
+#    already prints its log to stdout and they would duplicate every line.
+# ---------------------------------------------------------------------------
+RCON_URL="ws://127.0.0.1:${RCON_PORT:-28016}/${RCON_PASS:-}"
+
+rcon_up() { timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${RCON_PORT:-28016}" 2>/dev/null; }
+
+rcon_send() { # <command> - prints the command's own reply (Identifier 1)
+    jq -cn --arg m "$1" '{Identifier: 1, Message: $m, Name: "WebRcon"}' \
+        | timeout "${RCON_REPLY_WINDOW:-5}" websocat -t "${RCON_URL}" 2>/dev/null \
+        | jq --unbuffered -Rr 'fromjson? | select(.Identifier == 1 and (.Message // "") != "") | .Message' 2>/dev/null
+}
+
+console_bridge() {
+    local line
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        [ -z "${line}" ] && continue
+        if rcon_up; then
+            rcon_send "${line}"
+        elif [ "${line,,}" = "quit" ]; then
+            log "console: RCON is not up - stopping the server with SIGTERM instead of 'quit'."
+            kill -TERM "${SERVER_PID}" 2>/dev/null
+        else
+            log "console: RCON is not reachable (server still starting?) - command dropped: ${line}"
+        fi
+    done
+    # Wings detached stdin: nothing more to bridge, the server keeps running.
+}
+
 log "framework=${FRAMEWORK} branch=${BRANCH} launching RustDedicated"
-# exec so tini forwards SIGTERM/SIGINT straight to the server for a clean save.
 # shellcheck disable=SC2086
-exec ./RustDedicated "${ARGS[@]}" ${ADDITIONAL_ARGS:-}
+./RustDedicated "${ARGS[@]}" ${ADDITIONAL_ARGS:-} &
+SERVER_PID=$!
+
+# tini -g already signals the whole process group; forward explicitly as well
+# so a signal delivered only to this shell still reaches the server.
+trap 'kill -TERM "${SERVER_PID}" 2>/dev/null' TERM INT
+
+# Background jobs default stdin to /dev/null; hand the bridge the real
+# container stdin through fd 3.
+exec 3<&0
+console_bridge <&3 &
+BRIDGE_PID=$!
+
+EXIT_CODE=0
+while :; do
+    if wait "${SERVER_PID}"; then
+        EXIT_CODE=0; break
+    else
+        EXIT_CODE=$?
+        kill -0 "${SERVER_PID}" 2>/dev/null || break   # exited (or was killed)
+    fi                                                  # else: wait interrupted by trap - re-wait
+done
+kill "${BRIDGE_PID}" 2>/dev/null
+log "RustDedicated exited with code ${EXIT_CODE}."
+exit "${EXIT_CODE}"
