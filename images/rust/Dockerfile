@@ -47,6 +47,15 @@ RUN mkdir -p /opt/steamcmd \
        | tar -xz -C /opt/steamcmd \
     && chmod -R 0777 /opt/steamcmd
 
+# websocat: static WebSocket client for the panel-console -> WebRCON bridge.
+# RustDedicated ignores stdin (where Wings delivers console commands), so
+# start-rust forwards those lines to the server's WebRCON socket through this.
+ARG WEBSOCAT_VERSION=1.13.0
+RUN curl -fsSL -o /usr/local/bin/websocat \
+       "https://github.com/vi/websocat/releases/download/v${WEBSOCAT_VERSION}/websocat.x86_64-unknown-linux-musl" \
+    && chmod 0755 /usr/local/bin/websocat \
+    && /usr/local/bin/websocat --version
+
 ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 LANGUAGE=en_US.UTF-8 \
     USER=container HOME=/home/container \
     STEAMCMD_DIR=/opt/steamcmd \
