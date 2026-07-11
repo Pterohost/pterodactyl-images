@@ -1,7 +1,8 @@
 # pterodactyl-images
 
 Container images for [Pterodactyl Panel](https://pterodactyl.io/) maintained by [Pterohost](https://pterohost.com).
-Replaces the patchwork of third-party Java images used by Minecraft eggs with a single, multi-arch registry.
+Replaces the patchwork of third-party images used by Pterodactyl eggs with a single registry: a full
+multi-arch Java line for Minecraft plus native game-server images for s&box and Rust.
 
 Registry: `ghcr.io/pterohost/pterodactyl-images`
 Architectures: `linux/amd64`, `linux/arm64`
