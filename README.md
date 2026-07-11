@@ -33,11 +33,40 @@ License: MIT
 | Tag | Runtime | Base | Arch | Notes |
 |---|---|---|---|---|
 | `sbox` | s&box dedicated server (SteamCMD + Wine) | ubuntu:24.04 | amd64 | Steam app `1892930`, anonymous SteamCMD. See below. |
+| `rust` | RustDedicated (native Linux) | debian:12-slim | amd64 | Steam app `258550`, Oxide / Carbon / vanilla. See below. |
 
 The `sbox` tag bundles SteamCMD and Wine and ships a `start-sbox` bootstrap
 (downloads/validates the server, symlinks the Steam client SDK, then launches
 the server). Use it with a Pterodactyl egg whose startup command is `start-sbox`.
 amd64 only - s&box has no ARM build.
+
+The `rust` tag ships a `start-rust` bootstrap for the native Linux RustDedicated
+server. Use it with a Pterodactyl egg whose startup command is `start-rust`.
+amd64 only - Facepunch publishes no arm64 depot. Per boot it:
+
+- updates the server via anonymous SteamCMD (`STEAM_BRANCH`: `public`, `staging`,
+  `aux01`, `aux02`), run from a writable copy inside the server volume;
+- installs the selected modding framework deterministically
+  (`MODDING_FRAMEWORK`: `oxide`, `carbon` or `vanilla`), detects framework
+  switches and restores vanilla assemblies before changing over;
+- fetches optional Oxide extensions (`CHAOS_DL`, `DISCORD_EXT`, `RUSTEDIT_EXT`);
+- can preload jemalloc to cut memory fragmentation (`USE_JEMALLOC=1`;
+  vanilla/Carbon only - it is force-skipped for Oxide, whose compiler it breaks);
+- assembles the full RustDedicated argument list from egg variables (ports,
+  identity, map/seed/size or `MAP_URL`, tickrate, Rust+ `app.port` with public-IP
+  auto-detect, `ADDITIONAL_ARGS` passthrough).
+
+Every network step is non-fatal: a transient CDN or Steam hiccup logs a warning
+and boots with existing files instead of leaving the server down.
+
+**Panel console bridge.** RustDedicated does not read stdin, which is where
+Wings delivers panel-console input - on images without a bridge every console
+command (including the egg stop command `quit`) is silently ignored. The image
+bundles a pinned static [websocat](https://github.com/vi/websocat) and
+`start-rust` forwards each console line to the server's local WebRCON endpoint,
+echoing the command's reply back into the console. If RCON is not up yet,
+`quit` falls back to SIGTERM so a panel Stop still shuts the server down
+cleanly.
 
 s&box currently only ships an anonymously-installable build on the **Windows**
 depot; the native Linux depot returns `Missing configuration` from SteamCMD. So
@@ -92,6 +121,7 @@ Pterohost Java 21 GraalVM CE|ghcr.io/pterohost/pterodactyl-images:java_21_graalv
 Pterohost Java 25 LTS (Gen ZGC)|ghcr.io/pterohost/pterodactyl-images:java_25
 Pterohost Java 25 GraalVM CE|ghcr.io/pterohost/pterodactyl-images:java_25_graalvm
 Pterohost s&box (native Linux)|ghcr.io/pterohost/pterodactyl-images:sbox
+Pterohost Rust (Oxide/Carbon/vanilla)|ghcr.io/pterohost/pterodactyl-images:rust
 ```
 
 Bulk replacement of legacy tags in the `eggs.docker_images` JSON column can be done via a single
