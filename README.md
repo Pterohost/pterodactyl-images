@@ -350,6 +350,37 @@ image's tuning used to leave it unable to boot at all - the egg's startup names 
 and that image has none. Tuning variables it cannot honour are reported at startup rather than
 silently ignored.
 
+### User lookups under an arbitrary uid
+
+Wings runs a game container as the node's own uid - 988 on one node, 999 on the next - and that
+uid has no line in the image's `/etc/passwd`. Most servers never ask. The Bohemia engine does:
+DayZ and Arma 3 call `getpwuid()` during startup and read `pw_dir` straight off the result, so a
+NULL means SIGSEGV at offset 0x20, before the first log line and before any `.RPT` exists.
+
+`shared/entrypoint.sh` therefore checks whether the current uid resolves and, when it does not,
+writes a passwd/group pair into `/tmp` and preloads `libnss_wrapper.so` by soname - the bare
+soname so the loader picks the i386 build for the 32-bit SteamCMD and the amd64 build for the
+64-bit server. Images built without the library log a warning and carry on unchanged; a uid that
+already resolves skips the whole block.
+
+### Workshop mods (DayZ, Arma 3)
+
+`shared/workshop.sh` owns the mod list and the mods themselves for the two Bohemia images:
+
+- **The list.** Order of precedence is `CLIENT_MODS` (an explicit override), then `MODIFICATIONS`,
+  then the workshop ids parsed out of the `MOD_FILE` a player exports from the game launcher.
+  The two sources are additive and the result is sorted and de-duplicated, which is the order
+  these servers have always run with. The bootstrap passes it as one `-mod=` argument.
+  The egg cannot express this as a `{{VAR}}`: half of the list lives inside an uploaded HTML file.
+- **The mods.** Anything missing is downloaded, anything Steam reports as newer than the local
+  copy is refreshed, `.bikey` files land in `keys/`, and freshly downloaded content is lowercased
+  (Windows-built mods, case-sensitive filesystem). Named mods uploaded over SFTP are left alone.
+  `DISABLE_MOD_UPDATES=1` skips the sync and boots with what is on disk. A Steam outage is never
+  fatal.
+
+`shared/workshop.test.sh` covers the list resolution, including the case that matters most: a
+missing `MOD_FILE` must warn on stderr, never into the list itself.
+
 ## GC reference
 
 | Workload | Suggested tag | Suggested flag |

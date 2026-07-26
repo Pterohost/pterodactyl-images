@@ -33,6 +33,7 @@ RUN dpkg --add-architecture i386 \
         locales tzdata tini procps iproute2 lsof \
         lib32gcc-s1 lib32stdc++6 libgcc-s1 libstdc++6 \
         libjemalloc2 libgdiplus libsdl2-2.0-0 \
+        libnss-wrapper libnss-wrapper:i386 \
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
     && useradd -m -d /home/container -s /bin/bash container \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*

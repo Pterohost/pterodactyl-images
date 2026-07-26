@@ -23,6 +23,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 # The 32-bit runtime is for SteamCMD itself (a 32-bit binary); the game servers
 # on top are 64-bit. libjemalloc2 is available for images that want to preload it
 # to cut allocator fragmentation on long-running servers.
+#
+# libnss-wrapper is installed for both architectures on purpose: Wings runs the
+# container as an uid with no passwd entry, entrypoint.sh preloads the wrapper by
+# soname, and the 32-bit SteamCMD needs the i386 build of it just as much as the
+# 64-bit game server needs the amd64 one.
 RUN dpkg --add-architecture i386 \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -30,6 +35,7 @@ RUN dpkg --add-architecture i386 \
         locales tzdata tini procps iproute2 lsof net-tools netcat-openbsd telnet \
         lib32gcc-s1 lib32stdc++6 libgcc-s1 libstdc++6 lib32z1 zlib1g \
         libjemalloc2 libsdl2-2.0-0 libatomic1 libpulse0 \
+        libnss-wrapper libnss-wrapper:i386 \
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
     && useradd -m -d /home/container -s /bin/bash container \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
@@ -72,6 +78,7 @@ COPY --chmod=755 shared/steam-update.sh /usr/local/lib/pterohost/steam-update.sh
 COPY --chmod=755 shared/launch.sh /usr/local/lib/pterohost/launch.sh
 COPY --chmod=755 shared/kvconf.sh /usr/local/lib/pterohost/kvconf.sh
 COPY --chmod=755 shared/cfgconf.sh /usr/local/lib/pterohost/cfgconf.sh
+COPY --chmod=755 shared/workshop.sh /usr/local/lib/pterohost/workshop.sh
 COPY shared/motd.txt /motd.txt
 COPY shared/nodes.tsv /etc/pterohost/nodes.tsv
 USER container
