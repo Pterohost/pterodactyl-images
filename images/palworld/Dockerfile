@@ -16,16 +16,8 @@ LABEL org.opencontainers.image.description="Palworld dedicated server (Steam app
 
 USER root
 
-# gorcon: used by the graceful-stop path to Save before shutting down, and
-# handy for operators. Pinned so a broken upstream release cannot change the
-# behaviour of an existing image rebuild.
-ARG GORCON_VERSION=0.10.3
-RUN curl -fsSL -o /tmp/rcon.tar.gz \
-       "https://github.com/gorcon/rcon-cli/releases/download/v${GORCON_VERSION}/rcon-${GORCON_VERSION}-amd64_linux.tar.gz" \
-    && tar -xzf /tmp/rcon.tar.gz -C /tmp \
-    && install -m 0755 "/tmp/rcon-${GORCON_VERSION}-amd64_linux/rcon" /usr/local/bin/rcon \
-    && rm -rf /tmp/rcon.tar.gz "/tmp/rcon-${GORCON_VERSION}-amd64_linux" \
-    && /usr/local/bin/rcon --version
+# gorcon (used by the graceful-stop path to Save before shutting down) now
+# lives in the shared base.
 
 ENV PTEROHOST_JDK_TAG=palworld \
     SRCDS_APPID=2394010

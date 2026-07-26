@@ -42,14 +42,30 @@ pterohost_steam_sdk() {
     return 0
 }
 
+# pterohost_steam_login_args
+#   Most dedicated servers download anonymously. DayZ (223350) and Arma 3
+#   (233780) do not - Bohemia gates their server depots behind an account that
+#   owns the game, so those eggs carry STEAM_USER/STEAM_PASS. Anything else
+#   stays anonymous, which is both simpler and safer.
+pterohost_steam_login_args() {
+    if [ -n "${STEAM_USER:-}" ] && [ "${STEAM_USER}" != "anonymous" ] && [ -n "${STEAM_PASS:-}" ]; then
+        printf '%s\n%s\n%s\n' "+login" "${STEAM_USER}" "${STEAM_PASS}"
+    else
+        printf '%s\n%s\n' "+login" "anonymous"
+    fi
+}
+
 # pterohost_steam_update <appid> <branch> <validate> <sentinel>
 #   sentinel: a path that must exist for the update to count as successful.
 pterohost_steam_update() {
     local appid="$1" branch="${2:-}" validate="${3:-1}" sentinel="$4"
     local attempt=1 max_attempts="${STEAMCMD_ATTEMPTS:-3}"
-    local branch_args=() validate_arg=()
+    local branch_args=() validate_arg=() login_args=()
 
     pterohost_steam_seed
+
+    # readarray keeps the password intact even if it contains whitespace.
+    while IFS= read -r arg; do login_args+=("${arg}"); done < <(pterohost_steam_login_args)
 
     case "${branch}" in
         public|"") ;;                          # default branch takes no -beta
@@ -57,7 +73,7 @@ pterohost_steam_update() {
     esac
     [ "${validate}" = "1" ] && validate_arg=(validate)
 
-    pterohost_log "Updating Steam app ${appid}${branch:+ (branch ${branch})}..."
+    pterohost_log "Updating Steam app ${appid}${branch:+ (branch ${branch})} as ${login_args[1]}..."
 
     # Settle SteamCMD's own self-update first.
     "${STEAMCMD_RUN}/steamcmd.sh" +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 +quit >/dev/null 2>&1 || true
@@ -67,7 +83,7 @@ pterohost_steam_update() {
         timeout "${STEAMCMD_TIMEOUT:-1800}" "${STEAMCMD_RUN}/steamcmd.sh" \
             +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
             +force_install_dir /home/container \
-            +login anonymous \
+            "${login_args[@]}" \
             +app_update "${appid}" "${branch_args[@]}" "${validate_arg[@]}" \
             +quit || true
 

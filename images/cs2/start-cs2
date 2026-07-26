@@ -1,0 +1,57 @@
+#!/bin/bash
+# Pterohost Counter-Strike 2 bootstrap.
+#
+# CS2 is the one game here that cannot sit on the shared Debian base: Valve
+# builds it against the Steam Runtime 3 ("sniper") container and its cs2.sh
+# expects that environment. This image is therefore FROM the official sniper
+# platform with SteamCMD installed on top, rather than FROM steamcmd_base.
+#
+# CS2 answers Valve A2S on the game port with no extra configuration, so the
+# panel's status query needs nothing here - but -usercon is what makes RCON
+# available, and a GSLT is what makes the server publicly listed.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${SRCDS_APPID:-730}"
+
+if [ "${SRCDS_STOP_UPDATE:-0}" != "1" ]; then
+    pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${SRCDS_VALIDATE:-0}" \
+        "/home/container/game/cs2.sh" || true
+else
+    log "SRCDS_STOP_UPDATE=1 - skipping SteamCMD."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+args=(
+    -dedicated
+    +ip "${SERVER_IP}"
+    -port "${SERVER_PORT}"
+    +map "${SRCDS_MAP:-de_dust2}"
+    -maxplayers "${SRCDS_MAXPLAYERS:-64}"
+)
+
+# Without a Game Server Login Token the server never appears in the public
+# browser. Passing an empty one is worse than passing none.
+[ -n "${STEAM_TOKEN:-}" ] && args+=(+sv_setsteamaccount "${STEAM_TOKEN}")
+
+[ -n "${WORKSHOP_COLLECTION_ID:-}" ] && args+=(+host_workshop_collection "${WORKSHOP_COLLECTION_ID}")
+[ -n "${WORKSHOP_MAP_ID:-}" ] && args+=(+host_workshop_map "${WORKSHOP_MAP_ID}")
+
+if [ -n "${RCON_PASS:-}" ]; then
+    args+=(+rcon_password "${RCON_PASS}" -usercon)
+fi
+
+# shellcheck disable=SC2206
+[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+
+log "Starting CS2 on ${SERVER_IP}:${SERVER_PORT} (${SRCDS_MAP:-de_dust2})."
+
+# cs2.sh reads console commands from stdin and the egg stops with "quit".
+exec ./game/cs2.sh "${args[@]}"

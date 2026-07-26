@@ -1,0 +1,96 @@
+#!/bin/bash
+# Pterohost Garry's Mod bootstrap. 131 servers on this fleet - the largest
+# single game, so this one stays deliberately close to the behaviour of the
+# image it replaces and changes only what is worth changing.
+#
+# Notable:
+#   -strictportbind. Without it srcds silently walks to the next free port when
+#   the allocated one is briefly busy. The panel keeps advertising the
+#   allocated port, so players cannot connect and the status query reads
+#   whatever else happens to answer there. Failing loudly is better than
+#   running somewhere nobody is looking; set SRCDS_STRICT_PORT=0 to opt out.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${SRCDS_APPID:-4020}"
+BRANCH=""
+
+# The 64-bit build lives on a Steam beta branch (x86-64). It is the default
+# here: it is not constrained by the 32-bit address space, which is what a
+# large addon/workshop load actually runs into, and it is measurably faster.
+# Set USE_64BIT_BETA=0 for a server that needs a 32-bit-only binary module.
+#
+# Note this changes which depot SteamCMD pulls, so the first start after
+# switching re-downloads the server files.
+if [ "${USE_64BIT_BETA:-1}" = "1" ]; then
+    BRANCH="x86-64"
+    BINARY="./srcds_run_x64"
+    SENTINEL="/home/container/srcds_run_x64"
+else
+    BINARY="./srcds_run"
+    SENTINEL="/home/container/srcds_run"
+fi
+
+if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+    pterohost_steam_update "${APPID}" "${BRANCH}" "${VALIDATE:-0}" "${SENTINEL}" || true
+else
+    log "AUTO_UPDATE=0 - skipping SteamCMD."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+# Fall back rather than fail: if the 64-bit depot did not land (a Steam hiccup,
+# or the branch is unavailable), the 32-bit binary from the existing install
+# still starts the server.
+if [ ! -x "${BINARY}" ]; then
+    log "WARN: ${BINARY} missing - falling back to ./srcds_run."
+    BINARY="./srcds_run"
+fi
+
+args=(
+    -game garrysmod
+    -console
+    -port "${SERVER_PORT}"
+    +ip "${SERVER_IP}"
+    +map "${SRCDS_MAP:-gm_flatgrass}"
+    +gamemode "${GAMEMODE:-sandbox}"
+    +maxplayers "${MAX_PLAYERS:-32}"
+    -tickrate "${TICKRATE:-22}"
+    -norestart
+    -nohltv
+)
+
+[ "${SRCDS_STRICT_PORT:-1}" = "1" ] && args+=(-strictportbind)
+[ -n "${WORKSHOP_ID:-}" ] && args+=(+host_workshop_collection "${WORKSHOP_ID}")
+[ -n "${STEAM_ACC:-}" ] && args+=(+sv_setsteamaccount "${STEAM_ACC}")
+[ "${LUA_REFRESH:-0}" = "1" ] || args+=(-disableluarefresh)
+
+# RCON is how the panel enriches the player list with SteamIDs and IPs.
+if [ -n "${RCON_PASS:-}" ]; then
+    args+=(+rcon_password "${RCON_PASS}" -usercon)
+fi
+
+[ -n "${NET_PUBLIC_IP:-}" ] && args+=(+net_public_adr "${NET_PUBLIC_IP}")
+[ -n "${FPS_MAX:-}" ] && args+=(+fps_max "${FPS_MAX}")
+[ -n "${SV_HIBERNATE:-}" ] && args+=(+sv_hibernate_think "${SV_HIBERNATE}")
+[ -n "${SV_PURE:-}" ] && args+=(+sv_pure "${SV_PURE}")
+[ -n "${SERVER_REGION:-}" ] && [ "${SERVER_REGION}" != "255" ] && args+=(+sv_region "${SERVER_REGION}")
+
+if [ "${SERVER_LOG:-0}" = "1" ]; then
+    args+=(+sv_logecho 1 +sv_logfile 1 +log on +sv_logflush 1)
+fi
+
+# shellcheck disable=SC2206
+[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+
+log "Starting Garry's Mod on ${SERVER_IP}:${SERVER_PORT} (${SRCDS_MAP:-gm_flatgrass}, ${GAMEMODE:-sandbox}, tickrate ${TICKRATE:-22})."
+
+# exec: srcds reads console commands from stdin and the egg's stop command is
+# "quit", so Wings' own stop path already works. No wrapper needed.
+exec "${BINARY}" "${args[@]}"

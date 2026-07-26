@@ -68,6 +68,12 @@ jobs:
             dir: steamcmd-base
             # SteamCMD itself is a 32-bit x86 binary.
             platforms: linux/amd64
+          - tag: cs2
+            dir: cs2
+            # Built on the official Steam Runtime 3 (sniper) platform rather
+            # than steamcmd_base - Valve builds CS2 against that runtime and
+            # game/cs2.sh expects it.
+            platforms: linux/amd64
 
     steps:
       - name: Checkout
@@ -119,6 +125,20 @@ jobs:
             dir: zomboid
           - tag: palworld
             dir: palworld
+          - tag: gmod
+            dir: gmod
+          - tag: sevendaystodie
+            dir: sevendaystodie
+          - tag: valheim
+            dir: valheim
+          - tag: unturned
+            dir: unturned
+          - tag: satisfactory
+            dir: satisfactory
+          - tag: dayz
+            dir: dayz
+          - tag: arma3
+            dir: arma3
 
     steps:
       - name: Checkout
