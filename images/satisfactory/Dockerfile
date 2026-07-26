@@ -13,7 +13,10 @@ LABEL org.opencontainers.image.vendor="Pterohost"
 LABEL org.opencontainers.image.title="Pterohost Satisfactory"
 LABEL org.opencontainers.image.description="Satisfactory dedicated server (Steam app 1690800) with save-on-stop and the query interfaces bound to all interfaces. amd64 only."
 
-ENV PTEROHOST_JDK_TAG=satisfactory \
+ENV PTEROHOST_IMAGE=satisfactory \
+    PTEROHOST_RUNTIME="Satisfactory - UE5" \
+    PTEROHOST_STEAM_APP="1690800" \
+    PTEROHOST_NOTES="query bound to all interfaces, save-on-stop" \
     SRCDS_APPID=1690800
 
 COPY --chmod=755 images/satisfactory/start-satisfactory /usr/local/bin/start-satisfactory

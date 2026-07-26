@@ -84,6 +84,7 @@ graceful_stop() {
 trap graceful_stop SIGTERM SIGINT
 
 log "Starting Valheim '${SERVER_NAME:-My Server}' on port ${SERVER_PORT} (query $((SERVER_PORT + 1)))."
+pterohost_log_cmd ./valheim_server.x86_64 "${args[@]}"
 
 # Unity writes a lot of "(Filename: ...)" noise that drowns the console.
 if [ -n "${CONSOLE_FILTER:-}" ]; then

@@ -13,7 +13,10 @@ LABEL org.opencontainers.image.vendor="Pterohost"
 LABEL org.opencontainers.image.title="Pterohost 7 Days To Die (telnet console bridge)"
 LABEL org.opencontainers.image.description="7 Days To Die dedicated server (Steam app 294420) with a versioned telnet console bridge instead of a shell one-liner in the panel database. amd64 only."
 
-ENV PTEROHOST_JDK_TAG=sevendaystodie \
+ENV PTEROHOST_IMAGE=sevendaystodie \
+    PTEROHOST_RUNTIME="7 Days To Die - Unity" \
+    PTEROHOST_STEAM_APP="294420" \
+    PTEROHOST_NOTES="telnet console bridge" \
     SRCDS_APPID=294420
 
 COPY --chmod=755 images/sevendaystodie/start-7dtd /usr/local/bin/start-7dtd

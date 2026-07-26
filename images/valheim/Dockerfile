@@ -12,7 +12,10 @@ LABEL org.opencontainers.image.vendor="Pterohost"
 LABEL org.opencontainers.image.title="Pterohost Valheim (BepInEx, save-on-stop)"
 LABEL org.opencontainers.image.description="Valheim dedicated server (Steam app 896660) with optional BepInEx doorstop and a stop path that saves the world. amd64 only."
 
-ENV PTEROHOST_JDK_TAG=valheim \
+ENV PTEROHOST_IMAGE=valheim \
+    PTEROHOST_RUNTIME="Valheim - Unity (BepInEx-aware)" \
+    PTEROHOST_STEAM_APP="896660" \
+    PTEROHOST_NOTES="SIGTERM becomes SIGINT so the world saves" \
     SRCDS_APPID=896660 \
     SteamAppId=892970
 

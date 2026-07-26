@@ -52,6 +52,7 @@ args=(
 [ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
 
 log "Starting 7 Days To Die on port ${SERVER_PORT} (telnet ${TELNET_PORT})."
+pterohost_log_cmd ./7DaysToDieServer.x86_64 "${args[@]}"
 
 ./7DaysToDieServer.x86_64 "${args[@]}" &
 CHILD=$!

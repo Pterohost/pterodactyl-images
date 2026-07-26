@@ -26,8 +26,10 @@ RUN apt-get update \
         libfontconfig1 libfreetype6 libxi6 libxrender1 libxtst6 zlib1g \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
 
-ENV PTEROHOST_JDK_TAG=zomboid \
-    PTEROHOST_GC=ZGC \
+ENV PTEROHOST_IMAGE=zomboid \
+    PTEROHOST_RUNTIME="Project Zomboid - bundled JRE" \
+    PTEROHOST_STEAM_APP="380870" \
+    PTEROHOST_NOTES="JVM heap from the memory limit, RCON, save-on-stop" \
     SRCDS_APPID=380870
 
 COPY --chmod=755 images/zomboid/start-zomboid /usr/local/bin/start-zomboid

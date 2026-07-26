@@ -185,6 +185,7 @@ fi
 [ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
 
 log "Starting Garry's Mod on ${SERVER_IP}:${SERVER_PORT} (${SRCDS_MAP:-gm_flatgrass}, ${GAMEMODE:-sandbox}, tickrate ${TICKRATE:-22})."
+pterohost_log_cmd "${BINARY}" "${args[@]}"
 
 # exec: srcds reads console commands from stdin and the egg's stop command is
 # "quit", so Wings' own stop path already works. No wrapper needed.

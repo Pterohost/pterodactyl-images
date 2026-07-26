@@ -102,3 +102,21 @@ pterohost_steam_update() {
     pterohost_steam_sdk
     return 1
 }
+
+# pterohost_log_cmd <binary> <args...>
+#   Print the fully resolved launch command into the panel console.
+#
+#   With the launch line moved out of the egg and into the image, the startup
+#   field only reads "start-gmod" - so an owner asking "what flags is my server
+#   actually running with?" had no way to see them. This puts the real,
+#   post-resolution command in the console on every boot, which is also the
+#   honest place for it: it shows what the image decided (thread count, branch,
+#   allocator) and not just what was configured.
+pterohost_log_cmd() {
+    local binary="$1"; shift
+    printf '\033[0;36m[pterohost]\033[0m Launch command:\n'
+    printf '  \033[1m%s\033[0m' "${binary}"
+    printf ' %s' "$@"
+    printf '\n'
+    printf '\033[2m  Add your own flags with the ADDITIONAL_ARGS variable in the server settings.\033[0m\n'
+}
