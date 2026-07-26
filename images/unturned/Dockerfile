@@ -12,7 +12,10 @@ LABEL org.opencontainers.image.vendor="Pterohost"
 LABEL org.opencontainers.image.title="Pterohost Unturned"
 LABEL org.opencontainers.image.description="Unturned dedicated server (Steam app 1110390). amd64 only."
 
-ENV PTEROHOST_JDK_TAG=unturned \
+ENV PTEROHOST_IMAGE=unturned \
+    PTEROHOST_RUNTIME="Unturned - Unity headless" \
+    PTEROHOST_STEAM_APP="1110390" \
+    PTEROHOST_NOTES="-" \
     SRCDS_APPID=1110390
 
 COPY --chmod=755 images/unturned/start-unturned /usr/local/bin/start-unturned

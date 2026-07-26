@@ -52,6 +52,7 @@ fi
 [ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
 
 log "Starting CS2 on ${SERVER_IP}:${SERVER_PORT} (${SRCDS_MAP:-de_dust2})."
+pterohost_log_cmd ./game/cs2.sh "${args[@]}"
 
 # cs2.sh reads console commands from stdin and the egg stops with "quit".
 exec ./game/cs2.sh "${args[@]}"

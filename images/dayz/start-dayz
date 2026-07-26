@@ -71,6 +71,7 @@ args=(
 [ -n "${STARTUP_PARAMS:-}" ] && args+=(${STARTUP_PARAMS})
 
 log "Starting DayZ on port ${SERVER_PORT} (query ${QUERY_PORT:-stock})."
+pterohost_log_cmd "./${BINARY}" "${args[@]}"
 
 # The egg stops this game with SIGINT, which the binary handles itself.
 exec "./${BINARY}" "${args[@]}"

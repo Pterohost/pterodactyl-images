@@ -52,5 +52,6 @@ fi
 args+=("+InternetServer/${SERVER_FOLDER}")
 
 log "Starting Unturned '${NAME:-Unturned Server}' on port ${SERVER_PORT} (${SERVER_MAP:-PEI})."
+pterohost_log_cmd ./Unturned_Headless.x86_64 "${args[@]}"
 
 exec ./Unturned_Headless.x86_64 "${args[@]}"

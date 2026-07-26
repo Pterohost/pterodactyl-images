@@ -57,5 +57,6 @@ args=(
 [ -n "${STARTUP_PARAMS:-}" ] && args+=(${STARTUP_PARAMS})
 
 log "Starting Arma 3 on ${SERVER_IP}:${SERVER_PORT} (query $((SERVER_PORT + 1)))."
+pterohost_log_cmd "./${BINARY}" "${args[@]}"
 
 exec "./${BINARY}" "${args[@]}"

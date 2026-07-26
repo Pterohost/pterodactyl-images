@@ -107,14 +107,21 @@ if [ -z "$host_name" ] && command -v getent >/dev/null 2>&1; then
 fi
 [ -z "$host_name" ] && host_name=$(hostname 2>/dev/null || echo "?")
 
-# ---------- JDK ----------
-jdk_line="not detected"
+# ---------- Runtime ----------
+# The JDK/GC rows only make sense on the Java line. A Source or SteamCMD image
+# printing "JDK: not detected / Recommended GC: G1" is noise at best and
+# misleading at worst, so each image states its own runtime instead.
+jdk_line=""
 jdk_vendor=""
 if command -v java >/dev/null 2>&1; then
     jdk_raw=$(java -version 2>&1 | head -3)
     jdk_line=$(printf '%s\n' "$jdk_raw" | head -1)
     jdk_vendor=$(printf '%s\n' "$jdk_raw" | sed -n '2p')
 fi
+
+# Image tag: PTEROHOST_IMAGE is the current name, PTEROHOST_JDK_TAG the legacy
+# one the Java images still set.
+image_tag="${PTEROHOST_IMAGE:-${PTEROHOST_JDK_TAG:-unknown}}"
 
 # ---------- Render ----------
 printf '%b' "${C_MAG}"
@@ -125,10 +132,20 @@ hr
 printf '  %b%s%b\n' "${C_BOLD}" "Container diagnostics" "${C_RESET}"
 hr
 
-row "Image tag"      "${PTEROHOST_JDK_TAG:-unknown}"
-row "JDK"            "${jdk_line}"
-[ -n "$jdk_vendor" ] && row ""            "${jdk_vendor}"
-row "Recommended GC" "${PTEROHOST_GC:-G1}"
+row "Image"          "${image_tag}"
+
+# Java line: report the JDK that will actually run the server and the GC the
+# tag is built around.
+if [ -n "${jdk_line}" ]; then
+    row "JDK"            "${jdk_line}"
+    [ -n "$jdk_vendor" ] && row ""            "${jdk_vendor}"
+    [ -n "${PTEROHOST_GC:-}" ] && row "Recommended GC" "${PTEROHOST_GC}"
+fi
+
+# Game images describe themselves: what runs, and what this image does for it.
+[ -n "${PTEROHOST_RUNTIME:-}" ] && row "Runtime"        "${PTEROHOST_RUNTIME}"
+[ -n "${PTEROHOST_STEAM_APP:-}" ] && row "Steam app"      "${PTEROHOST_STEAM_APP}"
+[ -n "${PTEROHOST_NOTES:-}" ] && row "Tuning"         "${PTEROHOST_NOTES}"
 
 hr
 row "CPU model"      "${cpu_model:-unknown}"

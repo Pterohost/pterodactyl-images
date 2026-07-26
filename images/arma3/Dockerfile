@@ -13,7 +13,10 @@ LABEL org.opencontainers.image.vendor="Pterohost"
 LABEL org.opencontainers.image.title="Pterohost Arma 3"
 LABEL org.opencontainers.image.description="Arma 3 dedicated server (Steam app 233780, authenticated depot). amd64 only."
 
-ENV PTEROHOST_JDK_TAG=arma3 \
+ENV PTEROHOST_IMAGE=arma3 \
+    PTEROHOST_RUNTIME="Arma 3 - Real Virtuality" \
+    PTEROHOST_STEAM_APP="233780" \
+    PTEROHOST_NOTES="query port is gameport+1" \
     STEAMCMD_APPID=233780
 
 COPY --chmod=755 images/arma3/start-arma3 /usr/local/bin/start-arma3

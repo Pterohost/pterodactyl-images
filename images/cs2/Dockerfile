@@ -42,7 +42,10 @@ ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 LANGUAGE=en_US.UTF-8 \
     STEAMCMD_DIR=/opt/steamcmd \
     XDG_RUNTIME_DIR=/tmp \
     PATH=/usr/local/bin:/opt/steamcmd:/usr/bin:/bin \
-    PTEROHOST_JDK_TAG=cs2 \
+    PTEROHOST_IMAGE=cs2 \
+    PTEROHOST_RUNTIME="Counter-Strike 2 - Steam Runtime 3" \
+    PTEROHOST_STEAM_APP="730" \
+    PTEROHOST_NOTES="sniper platform, RCON" \
     SRCDS_APPID=730
 
 WORKDIR /home/container

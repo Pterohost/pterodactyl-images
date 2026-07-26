@@ -13,7 +13,10 @@ LABEL org.opencontainers.image.vendor="Pterohost"
 LABEL org.opencontainers.image.title="Pterohost DayZ (steamQueryPort synced to the allocation)"
 LABEL org.opencontainers.image.description="DayZ dedicated server (Steam app 223350, authenticated depot) with the Steam query port kept in step with the panel allocation. amd64 only."
 
-ENV PTEROHOST_JDK_TAG=dayz \
+ENV PTEROHOST_IMAGE=dayz \
+    PTEROHOST_RUNTIME="DayZ - Enfusion" \
+    PTEROHOST_STEAM_APP="223350" \
+    PTEROHOST_NOTES="steamQueryPort synced to the allocation" \
     STEAMCMD_APPID=223350
 
 COPY --chmod=755 images/dayz/start-dayz /usr/local/bin/start-dayz

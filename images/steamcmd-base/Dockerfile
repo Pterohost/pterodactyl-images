@@ -60,7 +60,10 @@ ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 LANGUAGE=en_US.UTF-8 \
     JEMALLOC_LIB=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
     XDG_RUNTIME_DIR=/tmp \
     PATH=/usr/local/bin:/opt/steamcmd:/usr/bin:/bin \
-    PTEROHOST_JDK_TAG=steamcmd_base
+    PTEROHOST_IMAGE=steamcmd_base \
+    PTEROHOST_RUNTIME="SteamCMD base - no game" \
+    PTEROHOST_STEAM_APP="-" \
+    PTEROHOST_NOTES="shared layer for the game images"
 
 WORKDIR /home/container
 COPY --chmod=755 shared/entrypoint.sh /entrypoint.sh

@@ -19,7 +19,10 @@ USER root
 # gorcon (used by the graceful-stop path to Save before shutting down) now
 # lives in the shared base.
 
-ENV PTEROHOST_JDK_TAG=palworld \
+ENV PTEROHOST_IMAGE=palworld \
+    PTEROHOST_RUNTIME="Palworld - UE5 dedicated" \
+    PTEROHOST_STEAM_APP="2394010" \
+    PTEROHOST_NOTES="RCON + REST API, perf threads" \
     SRCDS_APPID=2394010
 
 COPY --chmod=755 images/palworld/start-palworld /usr/local/bin/start-palworld

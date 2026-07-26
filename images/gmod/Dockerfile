@@ -22,7 +22,10 @@ RUN apt-get update \
         libsdl2-2.0-0:i386 \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
 
-ENV PTEROHOST_JDK_TAG=gmod \
+ENV PTEROHOST_IMAGE=gmod \
+    PTEROHOST_RUNTIME="Garry's Mod - srcds (x86-64 branch)" \
+    PTEROHOST_STEAM_APP="4020" \
+    PTEROHOST_NOTES="job threads from CPU quota, jemalloc, strict port bind" \
     SRCDS_APPID=4020 \
     USE_64BIT_BETA=1 \
     GMOD_MCORE=1 \

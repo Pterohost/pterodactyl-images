@@ -167,6 +167,7 @@ graceful_stop() {
 trap graceful_stop SIGTERM SIGINT
 
 log "Starting Palworld (game ${SERVER_PORT}, query ${QUERY_PORT:-unset}, rcon ${RCON_PORT:-off}, rest ${REST_PORT:-off})."
+pterohost_log_cmd "${BINARY}" "${args[@]}"
 
 "${BINARY}" "${args[@]}" &
 CHILD=$!
