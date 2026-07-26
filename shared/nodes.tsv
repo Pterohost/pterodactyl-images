@@ -3,4 +3,9 @@
 # Update this file and rebuild the images when a node is added or relocated.
 192.168.150.2	node09.pterohost.com
 192.168.151.2	node06.pterohost.com
+10.31.0.1	node06.pterohost.com
 192.168.153.2	node10.pterohost.com
+192.168.157.2	node07.pterohost.com
+192.168.159.2	node08.pterohost.com
+192.168.160.2	node05.pterohost.com
+192.168.161.2	node11.pterohost.com

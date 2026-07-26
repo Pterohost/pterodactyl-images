@@ -1,0 +1,173 @@
+#!/bin/bash
+# Pterohost Palworld dedicated-server bootstrap.
+#
+# Why this image exists:
+#
+# 1. QUERY. Palworld answers no Valve A2S on any port - verified by sweeping
+#    the game port, +1, +2, +24714, QUERY_PORT, RCON_PORT and every allocation
+#    on running servers. The only ways to read its state are RCON and the REST
+#    API, and both are configured exclusively inside PalWorldSettings.ini.
+#    The REST API is the richer of the two (player names, ping, level, server
+#    FPS, uptime, in-game days), so this image turns it on and points it at an
+#    allocated port.
+#
+# 2. LATENCY. -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS are the
+#    three flags Pocketpair documents for dedicated servers; they cost nothing
+#    and improve CPU utilisation on a game that is otherwise brutally
+#    single-thread bound. jemalloc is available as an opt-in preload because
+#    UE5 servers fragment the default allocator over long uptimes.
+#
+# The ini is only touched for the keys the panel owns (ports, RCON/REST,
+# admin password, slot count). Gameplay settings stay exactly as the owner
+# left them.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${SRCDS_APPID:-2394010}"
+BINARY="/home/container/Pal/Binaries/Linux/PalServer-Linux-Shipping"
+PAL_INI="/home/container/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini"
+
+# ---------------------------------------------------------------------------
+# 1. Update via anonymous SteamCMD.
+# ---------------------------------------------------------------------------
+if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+    pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${STEAM_VALIDATE:-0}" "${BINARY}" || true
+else
+    log "AUTO_UPDATE=0 - skipping SteamCMD, using existing server files."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Let the egg's own config parser run first when it is present, so servers
+#    migrating from the third-party image keep their existing behaviour. We
+#    then patch only the keys it does not manage.
+# ---------------------------------------------------------------------------
+if [ -x /home/container/PalworldServerConfigParser ]; then
+    log "Running PalworldServerConfigParser..."
+    ./PalworldServerConfigParser || log "WARN: config parser exited non-zero; continuing."
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Patch PalWorldSettings.ini.
+#
+# The file is not a flat key=value config: it is an Unreal ini holding one
+# giant OptionSettings=(Key=Value,Key=Value,...) tuple, so the generic kvconf
+# helper does not apply here.
+# ---------------------------------------------------------------------------
+pal_set() {
+    local key="$1" value="$2"
+
+    [ -f "${PAL_INI}" ] || return 0
+
+    local escaped
+    escaped="$(printf '%s' "${value}" | sed -e 's/[&|\\]/\\&/g')"
+
+    if grep -qE "[(,]${key}=" "${PAL_INI}"; then
+        # Values are either quoted strings or bare tokens up to the next , or ).
+        sed -i -E "s|([(,]${key}=)(\"[^\"]*\"|[^,)]*)|\1${escaped}|" "${PAL_INI}"
+    else
+        sed -i -E "s|(OptionSettings=\()|\1${key}=${escaped},|" "${PAL_INI}"
+    fi
+}
+
+if [ ! -f "${PAL_INI}" ]; then
+    log "WARN: ${PAL_INI} not found - Palworld writes it on first boot. Re-run to apply RCON/REST settings."
+else
+    cp -a "${PAL_INI}" "${PAL_INI}.pterohost-orig" 2>/dev/null || true
+
+    # RCON: the fallback path the panel uses for the player list.
+    if [ -n "${RCON_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+        pal_set RCONEnabled True
+        pal_set RCONPort "${RCON_PORT}"
+        log "RCON enabled on port ${RCON_PORT}."
+    fi
+
+    # REST API: the richer path (names, ping, level, fps, uptime, in-game days).
+    # Only enabled when the egg allocated a dedicated port for it - never
+    # squatting on a port the panel did not hand out.
+    if [ -n "${REST_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+        pal_set RESTAPIEnabled True
+        pal_set RESTAPIPort "${REST_PORT}"
+        log "REST API enabled on port ${REST_PORT}."
+    else
+        log "REST_PORT unset - the panel will fall back to RCON for player data."
+    fi
+
+    [ -n "${ADMIN_PASSWORD:-}" ] && pal_set AdminPassword "\"${ADMIN_PASSWORD}\""
+    [ -n "${SERVER_PASSWORD:-}" ] && pal_set ServerPassword "\"${SERVER_PASSWORD}\""
+    [ -n "${SERVER_NAME:-}" ] && pal_set ServerName "\"${SERVER_NAME}\""
+    [ -n "${SERVER_DESCRIPTION:-}" ] && pal_set ServerDescription "\"${SERVER_DESCRIPTION}\""
+    [ -n "${MAX_PLAYERS:-}" ] && pal_set ServerPlayerMaxNum "${MAX_PLAYERS}"
+    pal_set PublicPort "${SERVER_PORT}"
+    [ -n "${PUBLIC_IP:-}" ] && pal_set PublicIP "\"${PUBLIC_IP}\""
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Launch.
+# ---------------------------------------------------------------------------
+if [ "${USE_JEMALLOC:-0}" = "1" ] && [ -f "${JEMALLOC_LIB:-}" ]; then
+    export LD_PRELOAD="${JEMALLOC_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
+    log "jemalloc preloaded."
+fi
+
+export LD_LIBRARY_PATH="/home/container/.steam/sdk64:${LD_LIBRARY_PATH:-}"
+
+args=(
+    Pal
+    -port="${SERVER_PORT}"
+    -publicport="${SERVER_PORT}"
+    -servername="${SERVER_NAME:-Palworld}"
+)
+
+[ -n "${QUERY_PORT:-}" ] && args+=(-queryport="${QUERY_PORT}")
+[ -n "${MAX_PLAYERS:-}" ] && args+=(-players="${MAX_PLAYERS}")
+[ -n "${SERVER_PASSWORD:-}" ] && args+=(-serverpassword="${SERVER_PASSWORD}")
+[ -n "${PUBLIC_IP:-}" ] && args+=(-publicip="${PUBLIC_IP}")
+[ -n "${ADMIN_PASSWORD:-}" ] && args+=(-adminpassword="${ADMIN_PASSWORD}")
+[ -n "${RCON_PORT:-}" ] && args+=(-rcon)
+
+# The documented performance trio. Opt-out exists in case a future build
+# regresses on one of them.
+if [ "${PAL_PERF_FLAGS:-1}" = "1" ]; then
+    args+=(-useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS)
+fi
+
+# shellcheck disable=SC2206
+[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+
+CHILD=""
+
+# Palworld does not read stdin, so a clean stop means asking it over RCON to
+# save and shut down. Falling back to SIGTERM keeps a stop working even when
+# RCON is off.
+graceful_stop() {
+    [ -n "${CHILD}" ] && kill -0 "${CHILD}" 2>/dev/null || return
+
+    if command -v rcon >/dev/null 2>&1 && [ -n "${RCON_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+        log "Stop requested - saving over RCON before shutdown."
+        rcon -s -a "localhost:${RCON_PORT}" -p "${ADMIN_PASSWORD}" "Save" >/dev/null 2>&1 || true
+        sleep 2
+    fi
+
+    kill -TERM "${CHILD}" 2>/dev/null || true
+
+    for _ in $(seq 1 "${PAL_STOP_TIMEOUT:-60}"); do
+        kill -0 "${CHILD}" 2>/dev/null || return
+        sleep 1
+    done
+}
+
+trap graceful_stop SIGTERM SIGINT
+
+log "Starting Palworld (game ${SERVER_PORT}, query ${QUERY_PORT:-unset}, rcon ${RCON_PORT:-off}, rest ${REST_PORT:-off})."
+
+"${BINARY}" "${args[@]}" &
+CHILD=$!
+wait "${CHILD}"

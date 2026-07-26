@@ -1,0 +1,88 @@
+#!/bin/bash
+# Pterohost shared SteamCMD helper.
+#
+# Sourced by the per-game start-* bootstraps. Extracted from images/rust/start-rust,
+# where the awkward parts were learned the hard way:
+#
+#   - Wings mounts the container root read-only and runs the container as its own
+#     uid, but SteamCMD self-updates into its own directory. So we run it from a
+#     writable copy inside the (persistent) server volume, seeded on first boot.
+#   - The very first SteamCMD run updates and restarts itself. Doing that in a
+#     throwaway pass means the real update starts from a settled binary.
+#   - Every network step is non-fatal. A transient Steam/CDN hiccup logs a warning
+#     and boots with the files already on disk instead of leaving the server down.
+
+STEAMCMD_SRC="${STEAMCMD_DIR:-/opt/steamcmd}"
+STEAMCMD_RUN="/home/container/.steamcmd"
+
+pterohost_log() {
+    printf '\033[0;36m[pterohost]\033[0m %s\n' "$*"
+}
+
+# pterohost_steam_seed
+#   Make a writable SteamCMD available inside the volume. Idempotent.
+pterohost_steam_seed() {
+    if [ ! -x "${STEAMCMD_RUN}/steamcmd.sh" ]; then
+        mkdir -p "${STEAMCMD_RUN}"
+        cp -a "${STEAMCMD_SRC}/." "${STEAMCMD_RUN}/" 2>/dev/null || true
+    fi
+    # Without this SteamCMD reports a spurious disk-write error.
+    mkdir -p /home/container/steamapps
+}
+
+# pterohost_steam_sdk
+#   Link the Steam client SDK where Steamworks expects it. Must happen before the
+#   game starts or the server never appears in the in-game browser.
+pterohost_steam_sdk() {
+    mkdir -p "${HOME}/.steam/sdk32" "${HOME}/.steam/sdk64"
+    [ -f "${STEAMCMD_RUN}/linux32/steamclient.so" ] \
+        && ln -sf "${STEAMCMD_RUN}/linux32/steamclient.so" "${HOME}/.steam/sdk32/steamclient.so"
+    [ -f "${STEAMCMD_RUN}/linux64/steamclient.so" ] \
+        && ln -sf "${STEAMCMD_RUN}/linux64/steamclient.so" "${HOME}/.steam/sdk64/steamclient.so"
+    return 0
+}
+
+# pterohost_steam_update <appid> <branch> <validate> <sentinel>
+#   sentinel: a path that must exist for the update to count as successful.
+pterohost_steam_update() {
+    local appid="$1" branch="${2:-}" validate="${3:-1}" sentinel="$4"
+    local attempt=1 max_attempts="${STEAMCMD_ATTEMPTS:-3}"
+    local branch_args=() validate_arg=()
+
+    pterohost_steam_seed
+
+    case "${branch}" in
+        public|"") ;;                          # default branch takes no -beta
+        *) branch_args=(-beta "${branch}") ;;
+    esac
+    [ "${validate}" = "1" ] && validate_arg=(validate)
+
+    pterohost_log "Updating Steam app ${appid}${branch:+ (branch ${branch})}..."
+
+    # Settle SteamCMD's own self-update first.
+    "${STEAMCMD_RUN}/steamcmd.sh" +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 +quit >/dev/null 2>&1 || true
+
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        pterohost_log "SteamCMD attempt ${attempt}/${max_attempts}..."
+        timeout "${STEAMCMD_TIMEOUT:-1800}" "${STEAMCMD_RUN}/steamcmd.sh" \
+            +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
+            +force_install_dir /home/container \
+            +login anonymous \
+            +app_update "${appid}" "${branch_args[@]}" "${validate_arg[@]}" \
+            +quit || true
+
+        if [ -e "${sentinel}" ]; then
+            pterohost_log "SteamCMD update OK."
+            pterohost_steam_sdk
+            return 0
+        fi
+
+        pterohost_log "attempt ${attempt} did not produce ${sentinel} (transient?); retrying..."
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+
+    pterohost_log "WARN: ${sentinel} missing after ${max_attempts} attempts - continuing with existing files."
+    pterohost_steam_sdk
+    return 1
+}
