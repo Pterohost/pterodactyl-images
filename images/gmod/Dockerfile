@@ -24,7 +24,9 @@ RUN apt-get update \
 
 ENV PTEROHOST_JDK_TAG=gmod \
     SRCDS_APPID=4020 \
-    USE_64BIT_BETA=1
+    USE_64BIT_BETA=1 \
+    GMOD_MCORE=1 \
+    SV_PARALLEL=1
 
 COPY --chmod=755 images/gmod/start-gmod /usr/local/bin/start-gmod
 
