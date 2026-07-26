@@ -33,8 +33,61 @@ License: MIT
 
 | Tag | Runtime | Base | Arch | Notes |
 |---|---|---|---|---|
+| `steamcmd_base` | SteamCMD + tini + locales | debian:12-slim | amd64 | Shared base for the game images below. Not useful on its own. |
 | `sbox` | s&box dedicated server (SteamCMD + Wine) | ubuntu:24.04 | amd64 | Steam app `1892930`, anonymous SteamCMD. See below. |
 | `rust` | RustDedicated (native Linux) | debian:12-slim | amd64 | Steam app `258550`, Oxide / Carbon / vanilla. See below. |
+| `zomboid` | Project Zomboid dedicated server | `steamcmd_base` | amd64 | Steam app `380870`. cgroup-aware JVM heap, RCON, save-on-stop. See below. |
+| `palworld` | Palworld dedicated server | `steamcmd_base` | amd64 | Steam app `2394010`. RCON + REST API, perf flags. See below. |
+
+The `steamcmd_base` tag carries SteamCMD (in `/opt/steamcmd`, world-rwx because
+Wings runs the container under its own uid), the 32-bit runtime SteamCMD needs,
+`tini`, locales and two helper libraries the game bootstraps source:
+`steam-update.sh` (retry-hardened anonymous app update run from a writable copy
+inside the volume) and `kvconf.sh` (surgical `key=value` config patching that
+leaves keys we do not own untouched). Game images are `FROM` it, so adding a
+game is a short Dockerfile plus its `start-*` script.
+
+The `zomboid` tag ships a `start-zomboid` bootstrap. Use it with an egg whose
+startup command is `start-zomboid`. Per boot it:
+
+- updates the server via anonymous SteamCMD (non-fatal on failure);
+- **rewrites the JVM heap from the container's memory limit.** This is the
+  headline fix. `ProjectZomboid64` is an ELF launcher, not a shell script, and
+  it reads its JVM arguments only from `ProjectZomboid64.json` - which ships
+  with a hardcoded `-Xmx8g` and no `-Xms`. A 4 GB plan therefore runs a JVM that
+  believes it may grow to 8 GB and gets OOM-killed by the cgroup, while a 16 GB
+  plan silently caps itself at 8. Passing `-Xmx` on the command line does
+  nothing, which is why the widespread advice to edit `start-server.sh` has no
+  effect. `ZOMBOID_HEAP_PCT` (default 80) and `ZOMBOID_MAX_HEAP_MB` tune it;
+  `-Xms` is pinned equal to `-Xmx` so the JVM stops resizing the heap mid-game.
+  `ZOMBOID_GC=g1` switches from the vendor ZGC to G1 with a 50 ms pause target.
+- writes `DefaultPort`, `UDPPort`, `RCONPort`, `RCONPassword`, `PublicName` and
+  `MaxPlayers` into `<server>.ini` from the egg variables, leaving every
+  gameplay key the owner tuned alone. RCON matters because Zomboid's A2S reply
+  carries **no player names** - RCON `players` is the only way the panel can
+  list who is online;
+- turns SIGTERM into a `quit` on the game's stdin so the world is saved, waiting
+  up to `ZOMBOID_STOP_TIMEOUT` (default 90s) before escalating.
+
+The `palworld` tag ships a `start-palworld` bootstrap. Use it with an egg whose
+startup command is `start-palworld`. Per boot it:
+
+- updates via anonymous SteamCMD and runs the egg's own
+  `PalworldServerConfigParser` when present, so servers migrating from the
+  third-party image keep their existing behaviour;
+- enables **RCON** and the **REST API** in `PalWorldSettings.ini` from
+  `RCON_PORT` / `REST_PORT` / `ADMIN_PASSWORD`. Palworld answers no Valve A2S on
+  any port - verified by sweeping the game port, +1, +2, +24714, `QUERY_PORT`,
+  `RCON_PORT` and every allocation on running servers - so these two interfaces
+  are the only way to read a server's state. The REST API is the richer of the
+  two (player names, ping, level, server FPS, uptime, in-game days);
+- applies `-useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS` (opt out
+  with `PAL_PERF_FLAGS=0`) and can preload jemalloc with `USE_JEMALLOC=1`;
+- saves over RCON before shutting down.
+
+Neither image invents a port: RCON and the REST API are only enabled when the
+egg actually allocated one, so nothing ever squats on a port the panel did not
+hand out.
 
 The `sbox` tag bundles SteamCMD and Wine and ships a `start-sbox` bootstrap
 (downloads/validates the server, symlinks the Steam client SDK, then launches
@@ -123,6 +176,8 @@ Pterohost Java 25 LTS (Gen ZGC)|ghcr.io/pterohost/pterodactyl-images:java_25
 Pterohost Java 25 GraalVM CE|ghcr.io/pterohost/pterodactyl-images:java_25_graalvm
 Pterohost s&box (native Linux)|ghcr.io/pterohost/pterodactyl-images:sbox
 Pterohost Rust (Oxide/Carbon/vanilla)|ghcr.io/pterohost/pterodactyl-images:rust
+Pterohost Project Zomboid|ghcr.io/pterohost/pterodactyl-images:zomboid
+Pterohost Palworld (RCON + REST)|ghcr.io/pterohost/pterodactyl-images:palworld
 ```
 
 Bulk replacement of legacy tags in the `eggs.docker_images` JSON column can be done via a single

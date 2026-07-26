@@ -1,0 +1,244 @@
+#!/bin/bash
+# Pterohost Project Zomboid dedicated-server bootstrap.
+#
+# What this fixes relative to running the stock parkervcp/steamcmd image:
+#
+# 1. THE HEAP. ProjectZomboid64 is an ELF launcher (pzexe), not a shell script,
+#    and it takes its JVM arguments exclusively from ProjectZomboid64.json.
+#    That file ships with a hardcoded "-Xmx8g" and no -Xms. So a 4 GB plan runs
+#    a JVM that believes it may grow to 8 GB and gets OOM-killed by the cgroup,
+#    while a 16 GB plan silently caps itself at 8. Passing -Xmx on the command
+#    line does nothing, which is why the usual advice to edit start-server.sh
+#    has no effect. We rewrite vmArgs from SERVER_MEMORY instead, and set
+#    -Xms == -Xmx so the JVM stops resizing the heap during play.
+#
+# 2. RCON. Project Zomboid answers A2S but its A2S_PLAYER response carries no
+#    names, so the panel can only list players over RCON - and RCON is
+#    configured solely in <server>.ini, which the panel does not template. We
+#    write RCONPort/RCONPassword (and the ports) from the egg variables, and
+#    leave every gameplay key the owner has tuned alone.
+#
+# 3. Graceful shutdown. Zomboid does read stdin, so "quit" saves the world
+#    properly - but only if SIGTERM is turned into that command rather than
+#    killing the JVM outright.
+#
+# Every step is non-fatal: a Steam or Workshop hiccup logs a warning and boots
+# with the files already on disk.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/kvconf.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${SRCDS_APPID:-380870}"
+BRANCH="${SRCDS_BETAID:-}"
+SERVER_NAME="${SERVER_NAME:-Pterodactyl}"
+ZOMBOID_DIR="/home/container/.cache"
+
+# ---------------------------------------------------------------------------
+# 1. Update the server via anonymous SteamCMD.
+# ---------------------------------------------------------------------------
+if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+    pterohost_steam_update "${APPID}" "${BRANCH}" "${STEAM_VALIDATE:-0}" "/home/container/ProjectZomboid64" || true
+else
+    log "AUTO_UPDATE=0 - skipping SteamCMD, using existing server files."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+# ---------------------------------------------------------------------------
+# 2. JVM heap and GC, derived from the container's real memory limit.
+# ---------------------------------------------------------------------------
+JSON="/home/container/ProjectZomboid64.json"
+
+compute_heap_mb() {
+    local limit="${SERVER_MEMORY:-0}"
+
+    # Explicit override wins, for the rare server that needs hand-tuning.
+    if [ -n "${ZOMBOID_MAX_HEAP_MB:-}" ]; then
+        echo "${ZOMBOID_MAX_HEAP_MB}"
+        return
+    fi
+
+    # Unlimited plans report 0; fall back to the vendor default rather than
+    # handing the JVM the whole host.
+    if [ "${limit}" -le 0 ] 2>/dev/null; then
+        echo 8192
+        return
+    fi
+
+    # The JVM needs headroom beyond the heap for metaspace, code cache, GC
+    # structures, thread stacks and the game's native libraries. ZGC in
+    # particular reserves generously. 80% with a 1 GB floor keeps us inside the
+    # cgroup limit instead of being killed by it.
+    local pct="${ZOMBOID_HEAP_PCT:-80}"
+    local heap=$(( limit * pct / 100 ))
+
+    [ "${heap}" -lt 1024 ] && heap=1024
+    [ "${heap}" -gt "$(( limit - 256 ))" ] && heap=$(( limit - 256 ))
+    [ "${heap}" -lt 512 ] && heap=512
+
+    echo "${heap}"
+}
+
+if [ -f "${JSON}" ] && command -v jq >/dev/null 2>&1; then
+    HEAP_MB="$(compute_heap_mb)"
+    GC="${ZOMBOID_GC:-zgc}"
+
+    case "${GC}" in
+        g1)
+            # Community-favoured alternative: shorter, more frequent pauses.
+            gc_args='["-XX:+UseG1GC","-XX:MaxGCPauseMillis=50"]'
+            ;;
+        *)
+            # Vendor default. Kept as the default here so switching image does
+            # not silently change GC behaviour on a working server.
+            gc_args='["-XX:+UseZGC"]'
+            ;;
+    esac
+
+    if jq -e . "${JSON}" >/dev/null 2>&1; then
+        cp -a "${JSON}" "${JSON}.pterohost-orig" 2>/dev/null || true
+
+        tmp="$(mktemp)"
+        jq --argjson heap "${HEAP_MB}" --argjson gc "${gc_args}" '
+            .vmArgs = ([
+                "-Djava.awt.headless=true",
+                "-Xms\($heap)m",
+                "-Xmx\($heap)m",
+                "-Dzomboid.steam=1",
+                "-Dzomboid.znetlog=1",
+                "-Djava.library.path=linux64/:natives/",
+                "-Djava.security.egd=file:/dev/urandom",
+                "-XX:-OmitStackTraceInFastThrow"
+            ] + $gc)
+        ' "${JSON}" > "${tmp}" 2>/dev/null && mv "${tmp}" "${JSON}" \
+            && log "JVM heap set to ${HEAP_MB}m (limit ${SERVER_MEMORY:-?}m, GC ${GC})." \
+            || { rm -f "${tmp}"; log "WARN: could not rewrite ${JSON}; leaving vendor JVM args."; }
+    else
+        log "WARN: ${JSON} is not valid JSON; leaving it alone."
+    fi
+else
+    log "WARN: ${JSON} not found yet - JVM heap stays at the vendor default until the next boot."
+fi
+
+# glibc allocates one arena per thread by default, which inflates RSS in a
+# memory-capped container without buying throughput for this workload.
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+
+# ---------------------------------------------------------------------------
+# 3. Server ini: ports and RCON must agree with the panel's allocations.
+# ---------------------------------------------------------------------------
+INI="${ZOMBOID_DIR}/Server/${SERVER_NAME}.ini"
+mkdir -p "${ZOMBOID_DIR}/Server"
+
+if [ ! -f "${INI}" ]; then
+    # First boot: the game has not written its config yet. Seed a minimal file;
+    # Zomboid fills in every key it needs on startup.
+    log "No ${SERVER_NAME}.ini yet - seeding one."
+    : > "${INI}"
+fi
+
+kv_backup_once "${INI}" ports
+
+kv_set "${INI}" DefaultPort "${SERVER_PORT}"
+[ -n "${STEAM_PORT:-}" ] && kv_set "${INI}" UDPPort "${STEAM_PORT}"
+kv_set "${INI}" PublicName "${SERVER_NAME}"
+[ -n "${MAX_PLAYERS:-}" ] && kv_set "${INI}" MaxPlayers "${MAX_PLAYERS}"
+
+# RCON is what gives the panel a player list. Only enable it when the egg
+# actually allocated a port and set a password - never invent one, and never
+# leave RCON listening with an empty password.
+if [ -n "${RCON_PORT:-}" ] && [ -n "${RCON_PASSWORD:-}" ]; then
+    kv_set "${INI}" RCONPort "${RCON_PORT}"
+    kv_set "${INI}" RCONPassword "${RCON_PASSWORD}"
+    log "RCON enabled on port ${RCON_PORT}."
+else
+    log "RCON not configured (RCON_PORT/RCON_PASSWORD unset) - player names will be unavailable in the panel."
+fi
+
+[ -n "${SERVER_PUBLIC:-}" ] && kv_set "${INI}" Public "${SERVER_PUBLIC}"
+[ -n "${SERVER_PASSWORD:-}" ] && kv_set "${INI}" Password "${SERVER_PASSWORD}"
+
+# ---------------------------------------------------------------------------
+# 4. Launch, forwarding console input and turning SIGTERM into a clean save.
+# ---------------------------------------------------------------------------
+export PATH="./jre64/bin:${PATH}"
+export LD_LIBRARY_PATH="./linux64:./natives:.:./jre64/lib/amd64:${LD_LIBRARY_PATH:-}"
+
+# libjsig lets the JVM chain signal handlers instead of the game's native libs
+# stealing them. It ships inside the bundled JRE, so only preload it once the
+# game files are actually present - otherwise every boot before the first
+# SteamCMD run prints an ld.so preload error.
+if [ -f "/home/container/jre64/lib/amd64/libjsig.so" ] || [ -f "/home/container/jre64/lib/libjsig.so" ]; then
+    export LD_PRELOAD="${LD_PRELOAD:+${LD_PRELOAD}:}libjsig.so"
+fi
+
+CHILD=""
+
+# The game's stdin comes through a FIFO rather than straight from Wings, so the
+# signal handler has somewhere to write "quit" to. Writing to /proc/PID/fd/0
+# would be the obvious shortcut but is unreliable when that fd is a pipe.
+FIFO="/tmp/zomboid-stdin.$$"
+mkfifo "${FIFO}" 2>/dev/null || true
+# Open read-write on our own end so the FIFO never reports EOF to the game when
+# no writer happens to be attached.
+exec 3<>"${FIFO}"
+
+graceful_stop() {
+    if [ -z "${CHILD}" ] || ! kill -0 "${CHILD}" 2>/dev/null; then
+        return
+    fi
+
+    log "Stop requested - sending 'quit' so the world is saved."
+    printf 'quit\n' >&3
+
+    # A large world takes a while to write out. Escalating early is how save
+    # corruption happens, so wait it out first.
+    for _ in $(seq 1 "${ZOMBOID_STOP_TIMEOUT:-90}"); do
+        kill -0 "${CHILD}" 2>/dev/null || { log "Server exited cleanly."; return; }
+        sleep 1
+    done
+
+    log "Still running after ${ZOMBOID_STOP_TIMEOUT:-90}s - escalating to SIGTERM."
+    kill -TERM "${CHILD}" 2>/dev/null || true
+}
+
+trap graceful_stop SIGTERM SIGINT
+
+args=(
+    -cachedir="${ZOMBOID_DIR}"
+    -port "${SERVER_PORT}"
+    -servername "${SERVER_NAME}"
+    -adminusername "${ADMIN_USER:-admin}"
+)
+[ -n "${STEAM_PORT:-}" ] && args+=(-udpport "${STEAM_PORT}")
+[ -n "${ADMIN_PASSWORD:-}" ] && args+=(-adminpassword "${ADMIN_PASSWORD}")
+# Deliberately unquoted: ADDITIONAL_ARGS is a user-supplied argument list.
+# shellcheck disable=SC2206
+[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+
+log "Starting Project Zomboid (port ${SERVER_PORT}, udp ${STEAM_PORT:-unset})."
+
+./ProjectZomboid64 "${args[@]}" <"${FIFO}" &
+CHILD=$!
+
+# Forward panel console input into the same FIFO.
+while IFS= read -r line; do
+    printf '%s\n' "${line}" >&3
+done &
+FORWARDER=$!
+
+wait "${CHILD}"
+STATUS=$?
+
+kill "${FORWARDER}" 2>/dev/null || true
+exec 3>&-
+rm -f "${FIFO}"
+
+exit "${STATUS}"
