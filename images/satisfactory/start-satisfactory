@@ -1,0 +1,80 @@
+#!/bin/bash
+# Pterohost Satisfactory bootstrap.
+#
+# Satisfactory answers no Valve A2S. Its state comes from two interfaces on the
+# game port: a UDP "Lightweight Query" packet (no auth, always on) and an HTTPS
+# API that needs a token. The panel speaks both, so nothing has to be enabled
+# here - but -multihome must bind all interfaces or the UDP probe never reaches
+# the container.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${SRCDS_APPID:-1690800}"
+
+if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+    pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \
+        "/home/container/FactoryServer.sh" || true
+else
+    log "AUTO_UPDATE=0 - skipping SteamCMD."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+export LD_LIBRARY_PATH="/home/container/linux64:${LD_LIBRARY_PATH:-}"
+
+args=(
+    FactoryGame
+    -Port="${SERVER_PORT}"
+    -multihome=0.0.0.0
+    -unattended
+)
+
+[ -n "${RELIABLE_PORT:-}" ] && args+=(-ReliablePort="${RELIABLE_PORT}")
+
+# shellcheck disable=SC2206
+[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+
+# Satisfactory 1.0 ships FactoryServer.sh; older builds only had the Engine
+# binary. Prefer the wrapper when it exists - it sets up the Steam SDK paths.
+BINARY=""
+if [ -x ./FactoryServer.sh ]; then
+    BINARY="./FactoryServer.sh"
+else
+    BINARY="$(ls ./Engine/Binaries/Linux/*-Linux-Shipping 2>/dev/null | head -1)"
+fi
+
+if [ -z "${BINARY}" ] || [ ! -x "${BINARY}" ]; then
+    log "ERROR: no Satisfactory server binary found - the install may be incomplete."
+    exit 1
+fi
+
+CHILD=""
+
+# Satisfactory saves on SIGINT; a plain TERM drops the session.
+graceful_stop() {
+    [ -n "${CHILD}" ] && kill -0 "${CHILD}" 2>/dev/null || return
+
+    log "Stop requested - sending SIGINT so the save completes."
+    kill -INT "${CHILD}" 2>/dev/null || true
+
+    for _ in $(seq 1 "${SATISFACTORY_STOP_TIMEOUT:-90}"); do
+        kill -0 "${CHILD}" 2>/dev/null || { log "Server exited cleanly."; return; }
+        sleep 1
+    done
+
+    kill -TERM "${CHILD}" 2>/dev/null || true
+}
+
+trap graceful_stop SIGTERM SIGINT
+
+log "Starting Satisfactory on port ${SERVER_PORT} (reliable ${RELIABLE_PORT:-unset})."
+
+"${BINARY}" "${args[@]}" &
+CHILD=$!
+wait "${CHILD}"

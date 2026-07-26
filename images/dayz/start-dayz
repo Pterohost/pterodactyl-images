@@ -1,0 +1,76 @@
+#!/bin/bash
+# Pterohost DayZ bootstrap.
+#
+# Two DayZ-specific problems this solves:
+#
+# 1. The server depot (app 223350) is NOT anonymous - Bohemia gates it behind
+#    an account that owns the game, so this needs STEAM_USER/STEAM_PASS.
+#
+# 2. steamQueryPort. DayZ answers Steam queries on whatever serverDZ.cfg says,
+#    and the shipped template leaves it at the stock 27016 regardless of what
+#    the panel allocated. On a shared node that port usually belongs to a
+#    different customer, so the panel either sees nothing or - worse, before
+#    the query layer started refusing unowned ports - somebody else's server.
+#    We write the allocated port into the config so the two agree.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/cfgconf.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${STEAMCMD_APPID:-223350}"
+BINARY="${SERVER_BINARY:-DayZServer}"
+CFG="/home/container/serverDZ.cfg"
+
+if [ "${UPDATE_SERVER:-1}" = "1" ]; then
+    if [ -z "${STEAM_USER:-}" ] || [ "${STEAM_USER}" = "anonymous" ]; then
+        log "WARN: DayZ's server depot needs a Steam account that owns the game; STEAM_USER is unset."
+    fi
+    pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE_SERVER:-0}" \
+        "/home/container/${BINARY}" || true
+else
+    log "UPDATE_SERVER=0 - skipping SteamCMD."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+# ---------------------------------------------------------------------------
+# Keep serverDZ.cfg's ports in step with the panel's allocations.
+# ---------------------------------------------------------------------------
+if [ -f "${CFG}" ]; then
+    cp -a "${CFG}" "${CFG}.pterohost-orig" 2>/dev/null || true
+
+    if [ -n "${QUERY_PORT:-}" ]; then
+        cfg_set "${CFG}" steamQueryPort "${QUERY_PORT}"
+        log "steamQueryPort set to ${QUERY_PORT}."
+    else
+        log "WARN: QUERY_PORT unset - the server will keep the stock query port and may be invisible."
+    fi
+
+    [ -n "${MAX_PLAYERS:-}" ] && cfg_set "${CFG}" maxPlayers "${MAX_PLAYERS}"
+else
+    log "WARN: ${CFG} not found - ports left untouched."
+fi
+
+args=(
+    -port="${SERVER_PORT}"
+    -config=serverDZ.cfg
+    -profiles=profiles
+    -bepath=./
+)
+
+[ -n "${CLIENT_MODS:-}" ] && args+=("-mod=${CLIENT_MODS}")
+[ -n "${SERVERMODS:-}" ] && args+=("-serverMod=${SERVERMODS}")
+
+# shellcheck disable=SC2206
+[ -n "${STARTUP_PARAMS:-}" ] && args+=(${STARTUP_PARAMS})
+
+log "Starting DayZ on port ${SERVER_PORT} (query ${QUERY_PORT:-stock})."
+
+# The egg stops this game with SIGINT, which the binary handles itself.
+exec "./${BINARY}" "${args[@]}"

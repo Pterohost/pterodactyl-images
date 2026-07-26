@@ -27,12 +27,24 @@ RUN dpkg --add-architecture i386 \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl wget gnupg tar unzip xz-utils jq file bc \
-        locales tzdata tini procps iproute2 lsof net-tools \
-        lib32gcc-s1 lib32stdc++6 libgcc-s1 libstdc++6 \
-        libjemalloc2 libsdl2-2.0-0 \
+        locales tzdata tini procps iproute2 lsof net-tools netcat-openbsd telnet \
+        lib32gcc-s1 lib32stdc++6 libgcc-s1 libstdc++6 lib32z1 zlib1g \
+        libjemalloc2 libsdl2-2.0-0 libatomic1 libpulse0 \
     && sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && locale-gen \
     && useradd -m -d /home/container -s /bin/bash container \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
+
+# gorcon: the console bridge for games that do not read stdin (7 Days To Die
+# speaks telnet, Palworld speaks Source RCON) and the graceful-stop path for
+# games that need a "save" command before shutdown. Pinned so an upstream
+# release cannot silently change behaviour on a rebuild.
+ARG GORCON_VERSION=0.10.3
+RUN curl -fsSL -o /tmp/rcon.tar.gz \
+       "https://github.com/gorcon/rcon-cli/releases/download/v${GORCON_VERSION}/rcon-${GORCON_VERSION}-amd64_linux.tar.gz" \
+    && tar -xzf /tmp/rcon.tar.gz -C /tmp \
+    && install -m 0755 "/tmp/rcon-${GORCON_VERSION}-amd64_linux/rcon" /usr/local/bin/rcon \
+    && rm -rf /tmp/rcon.tar.gz "/tmp/rcon-${GORCON_VERSION}-amd64_linux" \
+    && /usr/local/bin/rcon --version
 
 # Wings runs the game container as its own uid (e.g. 998), not the image's
 # `container` user, and SteamCMD self-updates into its own directory - so the
@@ -55,6 +67,7 @@ COPY --chmod=755 shared/entrypoint.sh /entrypoint.sh
 COPY --chmod=755 shared/sysinfo.sh /sysinfo.sh
 COPY --chmod=755 shared/steam-update.sh /usr/local/lib/pterohost/steam-update.sh
 COPY --chmod=755 shared/kvconf.sh /usr/local/lib/pterohost/kvconf.sh
+COPY --chmod=755 shared/cfgconf.sh /usr/local/lib/pterohost/cfgconf.sh
 COPY shared/motd.txt /motd.txt
 COPY shared/nodes.tsv /etc/pterohost/nodes.tsv
 USER container

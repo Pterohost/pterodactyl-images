@@ -38,6 +38,14 @@ License: MIT
 | `rust` | RustDedicated (native Linux) | debian:12-slim | amd64 | Steam app `258550`, Oxide / Carbon / vanilla. See below. |
 | `zomboid` | Project Zomboid dedicated server | `steamcmd_base` | amd64 | Steam app `380870`. cgroup-aware JVM heap, RCON, save-on-stop. See below. |
 | `palworld` | Palworld dedicated server | `steamcmd_base` | amd64 | Steam app `2394010`. RCON + REST API, perf flags. See below. |
+| `gmod` | Garry's Mod (srcds) | `steamcmd_base` | amd64 | Steam app `4020`. **x86-64 branch by default**, RCON, strict port bind. |
+| `cs2` | Counter-Strike 2 | steamrt sniper | amd64 | Steam app `730`. On the official Steam Runtime 3 platform. |
+| `sevendaystodie` | 7 Days To Die | `steamcmd_base` | amd64 | Steam app `294420`. Telnet console bridge. |
+| `valheim` | Valheim (BepInEx-aware) | `steamcmd_base` | amd64 | Steam app `896660`. SIGTERM -> SIGINT so the world saves. |
+| `unturned` | Unturned | `steamcmd_base` | amd64 | Steam app `1110390`. |
+| `satisfactory` | Satisfactory | `steamcmd_base` | amd64 | Steam app `1690800`. Query interfaces bound to all interfaces. |
+| `dayz` | DayZ | `steamcmd_base` | amd64 | Steam app `223350`, **authenticated depot**. Syncs `steamQueryPort`. |
+| `arma3` | Arma 3 | `steamcmd_base` | amd64 | Steam app `233780`, **authenticated depot**. |
 
 The `steamcmd_base` tag carries SteamCMD (in `/opt/steamcmd`, world-rwx because
 Wings runs the container under its own uid), the 32-bit runtime SteamCMD needs,
@@ -88,6 +96,66 @@ startup command is `start-palworld`. Per boot it:
 Neither image invents a port: RCON and the REST API are only enabled when the
 egg actually allocated one, so nothing ever squats on a port the panel did not
 hand out.
+
+### The rest of the game line
+
+All of these replace third-party images the panel could not fix. Each is a
+`start-<game>` bootstrap on the shared base; the notable per-game bits:
+
+- **`gmod`** - runs the `x86-64` branch by default; it is not constrained by the
+  32-bit address space, which is what a large workshop/addon load actually runs
+  into. `USE_64BIT_BETA=0` returns to the 32-bit build for a server that needs a
+  32-bit-only binary module. Switching branch makes the next start re-download
+  the server files, and if the 64-bit depot does not land the bootstrap falls
+  back to `./srcds_run` rather than failing.
+  Also adds `-strictportbind`: without it srcds silently walks to
+  the next free port when the allocated one is briefly busy, while the panel
+  keeps advertising the allocated port - so players cannot connect and the
+  status query reads whatever else answers there. Opt out with
+  `SRCDS_STRICT_PORT=0`.
+- **`cs2`** - the one image not built on `steamcmd_base`. Valve builds CS2
+  against the Steam Runtime 3 container and `game/cs2.sh` expects it, so this
+  starts from `registry.gitlab.steamos.cloud/steamrt/sniper/platform` with
+  SteamCMD installed on top.
+- **`sevendaystodie`** - 7DTD does not read stdin; it exposes a telnet control
+  port. The image waits for that port (world generation takes minutes, so it
+  polls instead of sleeping a fixed amount) and attaches a console bridge, which
+  is what makes the panel console two-way and lets the stop command arrive. That
+  bridge used to be a shell one-liner in the panel database.
+- **`valheim`** - turns SIGTERM into SIGINT, because Valheim only writes the
+  world on SIGINT. Loads BepInEx via doorstop only when the preloader is
+  actually present, so a vanilla server is unaffected.
+- **`unturned`** - straightforward; notably does not pass the egg's
+  `GSLToken Not Set` placeholder through as a real token.
+- **`satisfactory`** - binds `-multihome=0.0.0.0` so the UDP Lightweight Query
+  and the HTTPS API are reachable from outside the container; saves on SIGINT.
+- **`dayz`** - writes `steamQueryPort` into `serverDZ.cfg` from the allocated
+  `QUERY_PORT`. The shipped template leaves it at the stock 27016, which on a
+  shared node usually belongs to a different customer.
+- **`arma3`** - Arma reserves `port..port+3` and answers Steam queries on `+1`,
+  which the panel does not allocate; nothing to configure, but it explains why a
+  server can be invisible when the neighbouring port is taken.
+
+`dayz` and `arma3` need `STEAM_USER`/`STEAM_PASS` - Bohemia gates those server
+depots behind an account that owns the game. Everything else installs
+anonymously.
+
+### Moving existing servers onto these images
+
+`servers.image` and `servers.startup` are per-server copies taken at creation.
+Editing the egg changes what NEW servers get and nothing else - every existing
+server keeps running the old image forever. The panel ships a command for the
+migration:
+
+```bash
+php artisan p:servers:set-image --egg=9 \
+    --image=ghcr.io/pterohost/pterodactyl-images:gmod \
+    --startup=start-gmod --update-egg          # dry run
+php artisan p:servers:set-image ... --apply --sync
+```
+
+It never restarts anything: a running server keeps its current container until
+someone restarts it.
 
 The `sbox` tag bundles SteamCMD and Wine and ships a `start-sbox` bootstrap
 (downloads/validates the server, symlinks the Steam client SDK, then launches

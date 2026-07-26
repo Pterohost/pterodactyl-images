@@ -1,0 +1,61 @@
+#!/bin/bash
+# Pterohost Arma 3 bootstrap.
+#
+# Like DayZ, the Arma 3 server depot (app 233780) is not anonymous - it needs a
+# Steam account that owns the game.
+#
+# Arma reserves a block of ports starting at -port: the game port itself, then
+# +1 for the Steam query and +2/+3 for Steam's own use. The panel only
+# allocates the game port, which is why its query registry allows an unassigned
+# +1 for this game. Nothing to configure here, but it is worth knowing when a
+# server does not show up: the neighbouring port may already be taken.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/cfgconf.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${STEAMCMD_APPID:-233780}"
+BINARY="${SERVER_BINARY:-arma3server_x64}"
+CFG="/home/container/server.cfg"
+
+if [ "${UPDATE_SERVER:-1}" = "1" ]; then
+    if [ -z "${STEAM_USER:-}" ] || [ "${STEAM_USER}" = "anonymous" ]; then
+        log "WARN: Arma 3's server depot needs a Steam account that owns the game; STEAM_USER is unset."
+    fi
+    pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE_SERVER:-0}" \
+        "/home/container/${BINARY}" || true
+else
+    log "UPDATE_SERVER=0 - skipping SteamCMD."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+if [ -f "${CFG}" ] && [ -n "${MAX_PLAYERS:-}" ]; then
+    cp -a "${CFG}" "${CFG}.pterohost-orig" 2>/dev/null || true
+    cfg_set "${CFG}" maxPlayers "${MAX_PLAYERS}"
+fi
+
+args=(
+    -ip="${SERVER_IP}"
+    -port="${SERVER_PORT}"
+    -profiles=./serverprofile
+    -bepath=./
+    -cfg=basic.cfg
+    -config=server.cfg
+)
+
+[ -n "${CLIENT_MODS:-}" ] && args+=("-mod=${CLIENT_MODS}")
+[ -n "${SERVERMODS:-}" ] && args+=("-serverMod=${SERVERMODS}")
+
+# shellcheck disable=SC2206
+[ -n "${STARTUP_PARAMS:-}" ] && args+=(${STARTUP_PARAMS})
+
+log "Starting Arma 3 on ${SERVER_IP}:${SERVER_PORT} (query $((SERVER_PORT + 1)))."
+
+exec "./${BINARY}" "${args[@]}"

@@ -1,0 +1,83 @@
+#!/bin/bash
+# Pterohost 7 Days To Die bootstrap.
+#
+# 7DTD does not read console commands from stdin - it exposes a telnet control
+# port instead. So the server runs in the background and this script attaches a
+# console bridge to it, which is what makes the panel console usable and what
+# lets the egg's "shutdown" stop command work at all.
+#
+# The bridge lived in the egg's startup command before, as a long shell
+# one-liner in the panel database. Here it can be read, fixed and versioned.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${SRCDS_APPID:-294420}"
+TELNET_PORT="${TELNET_PORT:-8081}"
+
+if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+    pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \
+        "/home/container/7DaysToDieServer.x86_64" || true
+else
+    log "AUTO_UPDATE=0 - skipping SteamCMD."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+export LD_LIBRARY_PATH="/home/container:${LD_LIBRARY_PATH:-}"
+mkdir -p logs
+
+args=(
+    -configfile=serverconfig.xml
+    -quit -batchmode -nographics -dedicated
+    -ServerPort="${SERVER_PORT}"
+    -ServerMaxPlayerCount="${MAX_PLAYERS:-8}"
+    -GameDifficulty="${GAME_DIFFICULTY:-2}"
+    -ControlPanelEnabled=false
+    -TelnetEnabled=true
+    -TelnetPort="${TELNET_PORT}"
+    -logfile logs/latest.log
+)
+
+[ -n "${SERVER_DISABLED_NETWORK_PROTOCOLS:-}" ] \
+    && args+=(-ServerDisabledNetworkProtocols="${SERVER_DISABLED_NETWORK_PROTOCOLS}")
+[ -n "${PASSWORD:-}" ] && args+=(-TelnetPassword="${PASSWORD}")
+
+# shellcheck disable=SC2206
+[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+
+log "Starting 7 Days To Die on port ${SERVER_PORT} (telnet ${TELNET_PORT})."
+
+./7DaysToDieServer.x86_64 "${args[@]}" &
+CHILD=$!
+
+# Wait for the control port rather than sleeping a fixed amount - world
+# generation on a fresh server takes minutes, and a fixed sleep either wastes
+# time or attaches too early.
+log "Waiting for the telnet control port..."
+for _ in $(seq 1 "${SEVENDTD_TELNET_TIMEOUT:-300}"); do
+    kill -0 "${CHILD}" 2>/dev/null || { log "Server exited before telnet came up."; wait "${CHILD}"; exit $?; }
+    nc -z 127.0.0.1 "${TELNET_PORT}" 2>/dev/null && break
+    sleep 1
+done
+
+if nc -z 127.0.0.1 "${TELNET_PORT}" 2>/dev/null; then
+    log "Console bridge attached on telnet ${TELNET_PORT}."
+    if [ -n "${PASSWORD:-}" ]; then
+        rcon -t telnet -a "127.0.0.1:${TELNET_PORT}" -p "${PASSWORD}"
+    else
+        # No telnet password means an unauthenticated control port; the game
+        # allows it, but say so rather than letting it pass unnoticed.
+        log "WARN: TelnetPassword is empty - the control port accepts anyone who can reach it."
+        rcon -t telnet -a "127.0.0.1:${TELNET_PORT}"
+    fi
+else
+    log "WARN: telnet never came up; console input will not reach the server."
+fi
+
+wait "${CHILD}"

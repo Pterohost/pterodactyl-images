@@ -1,0 +1,96 @@
+#!/bin/bash
+# Pterohost Valheim bootstrap (BepInEx-aware).
+#
+# Two things matter here:
+#
+# 1. SIGTERM must become SIGINT. Valheim only writes the world on SIGINT; a
+#    plain TERM loses whatever happened since the last autosave. The old egg
+#    encoded this as `trap "kill -2 $!; wait;" 15` inside the startup string.
+#
+# 2. The query port is gameport+1, and Valheim binds it itself - the panel does
+#    not allocate it. That is why the panel's query registry allows an
+#    unassigned +1 for this game specifically.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/steam-update.sh
+
+log() { pterohost_log "$@"; }
+
+APPID="${SRCDS_APPID:-896660}"
+
+if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+    pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \
+        "/home/container/valheim_server.x86_64" || true
+else
+    log "AUTO_UPDATE=0 - skipping SteamCMD."
+    pterohost_steam_seed
+    pterohost_steam_sdk
+fi
+
+# BepInEx, when the server has it installed. Loading doorstop unconditionally
+# would break a vanilla server, so probe for the preloader first.
+if [ "${BEPINEX_ENABLED:-1}" = "1" ] && [ -f "./BepInEx/core/BepInEx.Preloader.dll" ]; then
+    export DOORSTOP_ENABLED=1
+    export DOORSTOP_TARGET_ASSEMBLY="./BepInEx/core/BepInEx.Preloader.dll"
+    export LD_LIBRARY_PATH="./doorstop_libs:${LD_LIBRARY_PATH:-}"
+    export LD_PRELOAD="libdoorstop_x64.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+    log "BepInEx detected - doorstop enabled."
+else
+    log "Running vanilla (no BepInEx preloader found)."
+fi
+
+export LD_LIBRARY_PATH="./linux64:${LD_LIBRARY_PATH:-}"
+export SteamAppId=892970
+
+args=(
+    -nographics -batchmode
+    -name "${SERVER_NAME:-My Server}"
+    -port "${SERVER_PORT}"
+    -world "${WORLD:-Dedicated}"
+    -public "${PUBLIC_SERVER:-1}"
+    -saveinterval "${BACKUP_INTERVAL:-1800}"
+    -backups "${BACKUP_COUNT:-4}"
+    -backupshort "${BACKUP_SHORTTIME:-7200}"
+    -backuplong "${BACKUP_LONGTIME:-43200}"
+)
+
+[ -n "${PASSWORD:-}" ] && args+=(-password "${PASSWORD}")
+[ "${ENABLE_CROSSPLAY:-0}" = "1" ] && args+=(-crossplay)
+
+# shellcheck disable=SC2206
+[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+
+CHILD=""
+
+# Turn the runtime's SIGTERM into the SIGINT Valheim actually saves on.
+graceful_stop() {
+    [ -n "${CHILD}" ] && kill -0 "${CHILD}" 2>/dev/null || return
+
+    log "Stop requested - sending SIGINT so the world is saved."
+    kill -INT "${CHILD}" 2>/dev/null || true
+
+    for _ in $(seq 1 "${VALHEIM_STOP_TIMEOUT:-90}"); do
+        kill -0 "${CHILD}" 2>/dev/null || { log "Server exited cleanly."; return; }
+        sleep 1
+    done
+
+    log "Still running after the stop timeout - escalating."
+    kill -TERM "${CHILD}" 2>/dev/null || true
+}
+
+trap graceful_stop SIGTERM SIGINT
+
+log "Starting Valheim '${SERVER_NAME:-My Server}' on port ${SERVER_PORT} (query $((SERVER_PORT + 1)))."
+
+# Unity writes a lot of "(Filename: ...)" noise that drowns the console.
+if [ -n "${CONSOLE_FILTER:-}" ]; then
+    ./valheim_server.x86_64 "${args[@]}" > >(sed -uE "${CONSOLE_FILTER}") 2>&1 &
+else
+    ./valheim_server.x86_64 "${args[@]}" &
+fi
+
+CHILD=$!
+wait "${CHILD}"
