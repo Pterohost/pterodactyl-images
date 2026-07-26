@@ -8,7 +8,13 @@
 #   the allocated one is briefly busy. The panel keeps advertising the
 #   allocated port, so players cannot connect and the status query reads
 #   whatever else happens to answer there. Failing loudly is better than
-#   running somewhere nobody is looking; set SRCDS_STRICT_PORT=0 to opt out.
+#   running somewhere nobody is looking; set SRCDS_STRICT_BIND=0 to opt out.
+#
+#   The variable is deliberately NOT called SRCDS_STRICT_PORT: the panel's
+#   EggPortAnalyzer treats any egg variable matching /(^PORT_|_PORT$)/ as a port
+#   it should allocate, so that name made the allocator hand it a real port
+#   number (27001) instead of the 0/1 flag - silently disabling the feature and
+#   burning an allocation per server. Never end a non-port variable in _PORT.
 
 set -u
 cd /home/container || exit 1
@@ -66,7 +72,7 @@ args=(
     -nohltv
 )
 
-[ "${SRCDS_STRICT_PORT:-1}" = "1" ] && args+=(-strictportbind)
+[ "${SRCDS_STRICT_BIND:-1}" = "1" ] && args+=(-strictportbind)
 [ -n "${WORKSHOP_ID:-}" ] && args+=(+host_workshop_collection "${WORKSHOP_ID}")
 [ -n "${STEAM_ACC:-}" ] && args+=(+sv_setsteamaccount "${STEAM_ACC}")
 [ "${LUA_REFRESH:-0}" = "1" ] || args+=(-disableluarefresh)
@@ -96,10 +102,57 @@ fi
 # job system below or a convar that has historically crashed GMod servers.
 # ---------------------------------------------------------------------------
 
-# The engine's job-system thread pool. Left at the engine default unless asked:
-# raising it past the useful point costs context switches without adding
-# simulation throughput.
-[ -n "${SRCDS_THREADS:-}" ] && args+=(-threads "${SRCDS_THREADS}")
+# The engine's job-system thread pool.
+#
+# This MUST come from the container's CPU quota, not from nproc. nproc reports
+# the host's cores - 12, 24, 32 on these nodes - while the server is limited to
+# a fraction of one or two. Letting srcds size its pool from nproc means dozens
+# of job threads fighting over a 200% quota: pure context-switching, and the
+# cgroup throttles the lot. That is the single most common way a "tuned" Source
+# server ends up slower than an untuned one.
+srcds_auto_threads() {
+    local quota=""
+
+    # cgroup v2, then v1.
+    if [ -r /sys/fs/cgroup/cpu.max ]; then
+        read -r q p < /sys/fs/cgroup/cpu.max 2>/dev/null
+        if [ "${q}" != "max" ] && [ -n "${q}" ] && [ -n "${p}" ] && [ "${p}" -gt 0 ] 2>/dev/null; then
+            quota=$(awk -v q="${q}" -v p="${p}" 'BEGIN{printf "%d", int(q/p)}')
+        fi
+    elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ] && [ -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]; then
+        q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null)
+        p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null)
+        if [ -n "${q}" ] && [ "${q}" -gt 0 ] 2>/dev/null && [ -n "${p}" ] && [ "${p}" -gt 0 ] 2>/dev/null; then
+            quota=$(awk -v q="${q}" -v p="${p}" 'BEGIN{printf "%d", int(q/p)}')
+        fi
+    fi
+
+    # No quota at all (unlimited plan): fall back to host cores, still capped.
+    if [ -z "${quota}" ] || [ "${quota}" -lt 1 ] 2>/dev/null; then
+        quota=$(nproc 2>/dev/null || echo 1)
+    fi
+
+    # Source gets nothing from a large pool; past a handful of threads it is all
+    # overhead. One thread is left for the main game loop.
+    local threads=$(( quota > 1 ? quota - 1 : 1 ))
+    [ "${threads}" -gt 8 ] && threads=8
+
+    echo "${threads}"
+}
+
+case "${SRCDS_THREADS:-auto}" in
+    ''|engine)
+        : ;;                                   # leave the engine to decide
+    auto)
+        SRCDS_THREADS_RESOLVED="$(srcds_auto_threads)"
+        args+=(-threads "${SRCDS_THREADS_RESOLVED}")
+        log "Job threads: ${SRCDS_THREADS_RESOLVED} (derived from the container CPU quota, not host cores)."
+        ;;
+    *)
+        args+=(-threads "${SRCDS_THREADS}")
+        log "Job threads: ${SRCDS_THREADS} (set explicitly)."
+        ;;
+esac
 
 # Both of these are experimental and upstream ships them off, because they have
 # a long history of crashes and prediction errors on GMod specifically. They are
