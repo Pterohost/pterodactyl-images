@@ -4,11 +4,17 @@
 # image it replaces and changes only what is worth changing.
 #
 # Notable:
-#   -strictportbind. Without it srcds silently walks to the next free port when
-#   the allocated one is briefly busy. The panel keeps advertising the
-#   allocated port, so players cannot connect and the status query reads
-#   whatever else happens to answer there. Failing loudly is better than
-#   running somewhere nobody is looking; set SRCDS_STRICT_BIND=0 to opt out.
+#   -strictportbind, off by default. Without it srcds silently walks to the next
+#   free port when the allocated one is briefly busy: the panel keeps advertising
+#   the allocated port, so players cannot connect and the status query reads
+#   whatever else answers there. Failing loudly sounds better - but the flag does
+#   not only guard the allocated port. srcds also opens auxiliary UDP sockets on
+#   ephemeral ports, and with the flag set it quits over any of them. Server 3559
+#   died exactly that way: "Port 41543 was unavailable - quitting due to
+#   -strictportbind", a port it was never allocated and which another srcds on the
+#   same node happened to hold. On a node running dozens of Source servers behind
+#   one internal IP that collision is a matter of time, so the flag is opt-in:
+#   set SRCDS_STRICT_BIND=1 where a wandering game port is the worse failure.
 #
 #   The variable is deliberately NOT called SRCDS_STRICT_PORT: the panel's
 #   EggPortAnalyzer treats any egg variable matching /(^PORT_|_PORT$)/ as a port
@@ -89,7 +95,7 @@ fi
 # From here on everything is appended only when the startup command does not
 # already say otherwise - see the append-if-absent rule in launch.sh.
 
-[ "${SRCDS_STRICT_BIND:-1}" = "1" ] && pterohost_append_if_absent -strictportbind -strictportbind
+[ "${SRCDS_STRICT_BIND:-0}" = "1" ] && pterohost_append_if_absent -strictportbind -strictportbind
 [ -n "${WORKSHOP_ID:-}" ] && pterohost_append_if_absent +host_workshop_collection +host_workshop_collection "${WORKSHOP_ID}"
 [ "${LUA_REFRESH:-0}" = "1" ] || pterohost_append_if_absent -disableluarefresh -disableluarefresh
 

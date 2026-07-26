@@ -19,6 +19,8 @@ cd /home/container || exit 1
 . /usr/local/lib/pterohost/cfgconf.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/workshop.sh
 
 log() { pterohost_log "$@"; }
 
@@ -43,6 +45,27 @@ if [ -f "${CFG}" ] && [ -n "${MAX_PLAYERS:-}" ]; then
     cfg_set "${CFG}" maxPlayers "${MAX_PLAYERS}"
 fi
 
+# ---------------------------------------------------------------------------
+# Mods. Same contract as DayZ: the egg publishes MODIFICATIONS and MOD_FILE, the
+# command line wants one -mod= list, and the workshop items behind it have to be
+# on disk and current. 107410 is the Arma 3 game, which owns the workshop items.
+# ---------------------------------------------------------------------------
+CLIENT_MODS="$(pterohost_mods_client)"
+ALL_MODS="$(pterohost_mods_dedupe "${CLIENT_MODS};${SERVERMODS:-}")"
+
+if [ "${UPDATE_SERVER:-1}" = "1" ] && [ "${DISABLE_MOD_UPDATES:-0}" != "1" ]; then
+    pterohost_workshop_sync "${GAME_ID:-107410}" "${ALL_MODS}"
+elif [ -n "${ALL_MODS}" ]; then
+    log "Mod updates disabled - using the copies already on disk."
+fi
+
+if [ "${MODS_LOWERCASE:-0}" = "1" ]; then
+    log "MODS_LOWERCASE=1 - normalising mod file names."
+    for mod in $(printf '%s' "${ALL_MODS}" | tr ';' ' '); do
+        pterohost_mods_lowercase "/home/container/${mod}"
+    done
+fi
+
 # The base command, used only when the panel did not supply one (an egg that
 # still reads "start-arma3" and nothing else).
 args=(
@@ -63,7 +86,12 @@ else
     PTEROHOST_ARGS=("./${BINARY}" "${args[@]}")
 fi
 
-[ -n "${CLIENT_MODS:-}" ] && pterohost_append_if_absent -mod "-mod=${CLIENT_MODS}"
+# Resolved above from MODIFICATIONS + MOD_FILE. The egg cannot carry this as a
+# {{VAR}} in the startup line: half of it is parsed out of an uploaded HTML file.
+if [ -n "${CLIENT_MODS}" ]; then
+    pterohost_append_if_absent -mod "-mod=${CLIENT_MODS}"
+    log "Client mods: ${CLIENT_MODS}"
+fi
 [ -n "${SERVERMODS:-}" ] && pterohost_append_if_absent -serverMod "-serverMod=${SERVERMODS}"
 
 # A migrated egg carries {{STARTUP_PARAMS}} in the startup string itself.
