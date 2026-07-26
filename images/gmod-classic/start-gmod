@@ -1,0 +1,102 @@
+#!/bin/bash
+# Pterohost Garry's Mod - classic shell.
+#
+# This is the compatibility half of the GMod pair. The branded image
+# (images/gmod) updates via SteamCMD, selects the x86-64 branch, sizes the job
+# threads from the container's CPU quota and turns on two experimental convars.
+# Occasionally one of those is exactly what a server does not want, and the
+# answer used to be "switch to ghcr.io/pterodactyl/games:source" - which then
+# failed to boot, because that image has no start-gmod and the egg's startup
+# string names one.
+#
+# So: same upstream image, plus a start-gmod that does nothing but run what the
+# startup string says. No update, no branch selection, no allocator, no threads,
+# no convars. What is written in the panel is what runs.
+#
+# The one thing it does add is honesty about that: if a server arrives here with
+# the branded image's tuning variables switched on, it says out loud that they
+# are being ignored, rather than leaving an owner to wonder why the setting they
+# changed did nothing.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
+
+log() { pterohost_log "$@"; }
+
+warn_unsupported() {
+    log "WARN: ${1} is set, but the classic shell does not implement it - ${2}"
+}
+
+[ "${USE_64BIT_BETA:-0}" = "1" ] \
+    && warn_unsupported "USE_64BIT_BETA" "no branch switching here; whichever binary is installed is the one that runs."
+[ "${USE_JEMALLOC:-0}" = "1" ] \
+    && warn_unsupported "USE_JEMALLOC" "srcds runs against the default allocator."
+[ "${GMOD_MCORE:-0}" = "1" ] \
+    && warn_unsupported "GMOD_MCORE" "gmod_mcore_test is not added; put it in the startup command if you want it."
+[ "${SV_PARALLEL:-0}" = "1" ] \
+    && warn_unsupported "SV_PARALLEL" "sv_parallel_* is not added; put it in the startup command if you want it."
+
+case "${SRCDS_THREADS:-}" in
+    ''|engine) : ;;
+    *) warn_unsupported "SRCDS_THREADS" "-threads is not computed here; add it to the startup command instead." ;;
+esac
+
+[ "${AUTO_UPDATE:-0}" = "1" ] \
+    && log "Note: the classic shell does not run SteamCMD. Server files are updated by the egg's install script only."
+
+# The startup string is the command. The legacy fallback below only exists for a
+# server whose startup was never migrated - it is the plain upstream line.
+pterohost_panel_argv "$@"
+
+# This image keeps the upstream entrypoint, which flattens STARTUP through
+# `eval echo` and loses the quoting around an empty {{VAR}}. The flag it belonged
+# to then arrives with nothing after it and srcds reads the next flag as its
+# value - "+host_workshop_collection +fps_max 300" silently becomes a workshop
+# collection called "+fps_max". These are the optional slots the egg's line
+# carries; a flag from this list with no value is dropped.
+if [ "${PTEROHOST_FROM_PANEL}" = "1" ]; then
+    pterohost_prune_valueless_flags \
+        +host_workshop_collection +fps_max +sv_pure +sv_hibernate_think \
+        +sv_setsteamaccount +net_public_adr +sv_region +map +gamemode +maxplayers -tickrate
+fi
+
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    log "No launch command supplied - falling back to the stock Garry's Mod line."
+
+    PTEROHOST_ARGS=(
+        ./srcds_run
+        -game garrysmod
+        -console
+        -port "${SERVER_PORT}"
+        +ip "${SERVER_IP}"
+        +map "${SRCDS_MAP:-gm_flatgrass}"
+        +gamemode "${GAMEMODE:-sandbox}"
+        +maxplayers "${MAX_PLAYERS:-32}"
+        -tickrate "${TICKRATE:-22}"
+        -strictportbind
+        -norestart
+        -nohltv
+    )
+
+    [ -n "${WORKSHOP_ID:-}" ] && PTEROHOST_ARGS+=(+host_workshop_collection "${WORKSHOP_ID}")
+    [ -n "${STEAM_ACC:-}" ] && PTEROHOST_ARGS+=(+sv_setsteamaccount "${STEAM_ACC}")
+
+    if [ -n "${ADDITIONAL_ARGS:-}" ]; then
+        # shellcheck disable=SC2206
+        PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+    fi
+fi
+
+# Credentials never live in the startup string, so they are added here on both
+# paths - the only thing this shell appends at all.
+if [ -n "${RCON_PASS:-}" ]; then
+    pterohost_append_if_absent +rcon_password +rcon_password "${RCON_PASS}" -usercon
+fi
+
+log "Starting Garry's Mod on ${SERVER_IP}:${SERVER_PORT} (classic shell - no image-side tuning)."
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+
+exec "${PTEROHOST_ARGS[@]}"

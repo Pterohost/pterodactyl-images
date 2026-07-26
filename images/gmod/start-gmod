@@ -21,6 +21,8 @@ cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
@@ -59,6 +61,9 @@ if [ ! -x "${BINARY}" ]; then
     BINARY="./srcds_run"
 fi
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-gmod" and nothing else). Migrated servers carry the same
+# flags in their startup string, where the owner can see and edit them.
 args=(
     -game garrysmod
     -console
@@ -72,24 +77,40 @@ args=(
     -nohltv
 )
 
-[ "${SRCDS_STRICT_BIND:-1}" = "1" ] && args+=(-strictportbind)
-[ -n "${WORKSHOP_ID:-}" ] && args+=(+host_workshop_collection "${WORKSHOP_ID}")
-[ -n "${STEAM_ACC:-}" ] && args+=(+sv_setsteamaccount "${STEAM_ACC}")
-[ "${LUA_REFRESH:-0}" = "1" ] || args+=(-disableluarefresh)
+pterohost_panel_argv "$@"
 
-# RCON is how the panel enriches the player list with SteamIDs and IPs.
-if [ -n "${RCON_PASS:-}" ]; then
-    args+=(+rcon_password "${RCON_PASS}" -usercon)
+if [ "${PTEROHOST_FROM_PANEL}" = "1" ]; then
+    # The egg names ./srcds_run; the x86-64 branch installs a second binary.
+    pterohost_swap_binary ./srcds_run "${BINARY}"
+else
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
 fi
 
-[ -n "${NET_PUBLIC_IP:-}" ] && args+=(+net_public_adr "${NET_PUBLIC_IP}")
-[ -n "${FPS_MAX:-}" ] && args+=(+fps_max "${FPS_MAX}")
-[ -n "${SV_HIBERNATE:-}" ] && args+=(+sv_hibernate_think "${SV_HIBERNATE}")
-[ -n "${SV_PURE:-}" ] && args+=(+sv_pure "${SV_PURE}")
-[ -n "${SERVER_REGION:-}" ] && [ "${SERVER_REGION}" != "255" ] && args+=(+sv_region "${SERVER_REGION}")
+# From here on everything is appended only when the startup command does not
+# already say otherwise - see the append-if-absent rule in launch.sh.
+
+[ "${SRCDS_STRICT_BIND:-1}" = "1" ] && pterohost_append_if_absent -strictportbind -strictportbind
+[ -n "${WORKSHOP_ID:-}" ] && pterohost_append_if_absent +host_workshop_collection +host_workshop_collection "${WORKSHOP_ID}"
+[ "${LUA_REFRESH:-0}" = "1" ] || pterohost_append_if_absent -disableluarefresh -disableluarefresh
+
+# Kept out of the visible startup string: a GSLT is a credential, and the panel
+# renders the startup command with variable values substituted in.
+[ -n "${STEAM_ACC:-}" ] && pterohost_append_if_absent +sv_setsteamaccount +sv_setsteamaccount "${STEAM_ACC}"
+
+# RCON is how the panel enriches the player list with SteamIDs and IPs. Also a
+# credential, so it stays here rather than in the egg.
+if [ -n "${RCON_PASS:-}" ]; then
+    pterohost_append_if_absent +rcon_password +rcon_password "${RCON_PASS}" -usercon
+fi
+
+[ -n "${NET_PUBLIC_IP:-}" ] && pterohost_append_if_absent +net_public_adr +net_public_adr "${NET_PUBLIC_IP}"
+[ -n "${FPS_MAX:-}" ] && pterohost_append_if_absent +fps_max +fps_max "${FPS_MAX}"
+[ -n "${SV_HIBERNATE:-}" ] && pterohost_append_if_absent +sv_hibernate_think +sv_hibernate_think "${SV_HIBERNATE}"
+[ -n "${SV_PURE:-}" ] && pterohost_append_if_absent +sv_pure +sv_pure "${SV_PURE}"
+[ -n "${SERVER_REGION:-}" ] && [ "${SERVER_REGION}" != "255" ] && pterohost_append_if_absent +sv_region +sv_region "${SERVER_REGION}"
 
 if [ "${SERVER_LOG:-0}" = "1" ]; then
-    args+=(+sv_logecho 1 +sv_logfile 1 +log on +sv_logflush 1)
+    pterohost_append_if_absent +sv_logfile +sv_logecho 1 +sv_logfile 1 +log on +sv_logflush 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -140,32 +161,36 @@ srcds_auto_threads() {
     echo "${threads}"
 }
 
-case "${SRCDS_THREADS:-auto}" in
-    ''|engine)
-        : ;;                                   # leave the engine to decide
-    auto)
-        SRCDS_THREADS_RESOLVED="$(srcds_auto_threads)"
-        args+=(-threads "${SRCDS_THREADS_RESOLVED}")
-        log "Job threads: ${SRCDS_THREADS_RESOLVED} (derived from the container CPU quota, not host cores)."
-        ;;
-    *)
-        args+=(-threads "${SRCDS_THREADS}")
-        log "Job threads: ${SRCDS_THREADS} (set explicitly)."
-        ;;
-esac
+if pterohost_has_flag -threads "${PTEROHOST_ARGS[@]}"; then
+    log "Job threads: taken from the startup command."
+else
+    case "${SRCDS_THREADS:-auto}" in
+        ''|engine)
+            : ;;                                   # leave the engine to decide
+        auto)
+            SRCDS_THREADS_RESOLVED="$(srcds_auto_threads)"
+            PTEROHOST_ARGS+=(-threads "${SRCDS_THREADS_RESOLVED}")
+            log "Job threads: ${SRCDS_THREADS_RESOLVED} (derived from the container CPU quota, not host cores)."
+            ;;
+        *)
+            PTEROHOST_ARGS+=(-threads "${SRCDS_THREADS}")
+            log "Job threads: ${SRCDS_THREADS} (set explicitly)."
+            ;;
+    esac
+fi
 
 # Both of these are experimental and upstream ships them off, because they have
 # a long history of crashes and prediction errors on GMod specifically. They are
 # ON by default here as a deliberate Pterohost choice - set the variable to 0 to
 # roll back on a server that misbehaves; it takes effect on the next start.
-if [ "${GMOD_MCORE:-1}" = "1" ]; then
+if [ "${GMOD_MCORE:-1}" = "1" ] && ! pterohost_has_flag +gmod_mcore_test "${PTEROHOST_ARGS[@]}"; then
     log "gmod_mcore_test enabled (experimental; set GMOD_MCORE=0 if the server becomes unstable)."
-    args+=(+gmod_mcore_test 1)
+    PTEROHOST_ARGS+=(+gmod_mcore_test 1)
 fi
 
-if [ "${SV_PARALLEL:-1}" = "1" ]; then
+if [ "${SV_PARALLEL:-1}" = "1" ] && ! pterohost_has_flag +sv_parallel_packentities "${PTEROHOST_ARGS[@]}"; then
     log "Parallel entity packing/snapshots enabled (experimental; set SV_PARALLEL=0 to roll back)."
-    args+=(+sv_parallel_packentities 1 +sv_parallel_sendsnapshot 1)
+    PTEROHOST_ARGS+=(+sv_parallel_packentities 1 +sv_parallel_sendsnapshot 1)
 fi
 
 # glibc allocates an arena per thread, which inflates RSS in a memory-capped
@@ -181,12 +206,16 @@ if [ "${USE_JEMALLOC:-1}" = "1" ] && [ "${BINARY}" = "./srcds_run_x64" ] && [ -f
     log "jemalloc preloaded."
 fi
 
-# shellcheck disable=SC2206
-[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself;
+# appending it again here would duplicate every flag the owner set.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+fi
 
 log "Starting Garry's Mod on ${SERVER_IP}:${SERVER_PORT} (${SRCDS_MAP:-gm_flatgrass}, ${GAMEMODE:-sandbox}, tickrate ${TICKRATE:-22})."
-pterohost_log_cmd "${BINARY}" "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
 # exec: srcds reads console commands from stdin and the egg's stop command is
 # "quit", so Wings' own stop path already works. No wrapper needed.
-exec "${BINARY}" "${args[@]}"
+exec "${PTEROHOST_ARGS[@]}"

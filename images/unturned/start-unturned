@@ -9,11 +9,14 @@ cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
 APPID="${SRCDS_APPID:-1110390}"
 SERVER_FOLDER="${SERVER_FOLDER:-unturned}"
+BINARY="./Unturned_Headless.x86_64"
 
 if [ "${GAME_AUTOUPDATE:-1}" = "1" ] || [ "${AUTO_UPDATE:-0}" = "1" ]; then
     pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \
@@ -24,6 +27,8 @@ else
     pterohost_steam_sdk
 fi
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-unturned" and nothing else).
 args=(
     -batchmode -nographics -ThreadedConsole -silent
     -port "${SERVER_PORT}"
@@ -36,22 +41,43 @@ args=(
     -LogSteamNetworkingSockets=0
 )
 
-[ -n "${PASSWORD:-}" ] && args+=(-password "${PASSWORD}")
-[ -n "${OWNER:-}" ] && args+=(-owner "${OWNER}")
-[ -n "${WELCOME:-}" ] && args+=(-welcome "${WELCOME}")
+pterohost_panel_argv "$@"
+
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
+fi
+
+[ -n "${OWNER:-}" ] && pterohost_append_if_absent -owner -owner "${OWNER}"
+[ -n "${WELCOME:-}" ] && pterohost_append_if_absent -welcome -welcome "${WELCOME}"
+
+# Credentials stay out of the startup string: the panel renders it with the
+# variable values substituted in.
+[ -n "${PASSWORD:-}" ] && pterohost_append_if_absent -password -password "${PASSWORD}"
 
 # The GSLT placeholder the egg ships must not be passed through as a token.
 if [ -n "${STEAM_ACC:-}" ] && [ "${STEAM_ACC}" != "GSLToken Not Set" ]; then
-    args+=(-gslt "${STEAM_ACC}")
+    pterohost_append_if_absent -gslt -gslt "${STEAM_ACC}"
 fi
 
-# shellcheck disable=SC2206
-[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+fi
 
-# Trailing positional argument: which server instance directory to load.
-args+=("+InternetServer/${SERVER_FOLDER}")
+# Trailing positional argument: which server instance directory to load. It has
+# to be genuinely last - Unturned treats everything after it as further
+# commands - so it is appended here rather than written into the egg, where the
+# image would then have no way to add anything without landing behind it.
+instance_set=0
+for arg in "${PTEROHOST_ARGS[@]}"; do
+    case "${arg}" in
+        +InternetServer/*|+LanServer/*) instance_set=1 ;;
+    esac
+done
+[ "${instance_set}" = "0" ] && PTEROHOST_ARGS+=("+InternetServer/${SERVER_FOLDER}")
 
 log "Starting Unturned '${NAME:-Unturned Server}' on port ${SERVER_PORT} (${SERVER_MAP:-PEI})."
-pterohost_log_cmd ./Unturned_Headless.x86_64 "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-exec ./Unturned_Headless.x86_64 "${args[@]}"
+exec "${PTEROHOST_ARGS[@]}"

@@ -20,6 +20,8 @@ cd /home/container || exit 1
 . /usr/local/lib/pterohost/steam-update.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/cfgconf.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
@@ -57,6 +59,8 @@ else
     log "WARN: ${CFG} not found - ports left untouched."
 fi
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-dayz" and nothing else).
 args=(
     -port="${SERVER_PORT}"
     -config=serverDZ.cfg
@@ -64,14 +68,26 @@ args=(
     -bepath=./
 )
 
-[ -n "${CLIENT_MODS:-}" ] && args+=("-mod=${CLIENT_MODS}")
-[ -n "${SERVERMODS:-}" ] && args+=("-serverMod=${SERVERMODS}")
+pterohost_panel_argv "$@"
 
-# shellcheck disable=SC2206
-[ -n "${STARTUP_PARAMS:-}" ] && args+=(${STARTUP_PARAMS})
+if [ "${PTEROHOST_FROM_PANEL}" = "1" ]; then
+    # The egg names the stock binary; SERVER_BINARY can point somewhere else.
+    pterohost_swap_binary ./DayZServer "./${BINARY}"
+else
+    PTEROHOST_ARGS=("./${BINARY}" "${args[@]}")
+fi
+
+[ -n "${CLIENT_MODS:-}" ] && pterohost_append_if_absent -mod "-mod=${CLIENT_MODS}"
+[ -n "${SERVERMODS:-}" ] && pterohost_append_if_absent -serverMod "-serverMod=${SERVERMODS}"
+
+# A migrated egg carries {{STARTUP_PARAMS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${STARTUP_PARAMS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${STARTUP_PARAMS})
+fi
 
 log "Starting DayZ on port ${SERVER_PORT} (query ${QUERY_PORT:-stock})."
-pterohost_log_cmd "./${BINARY}" "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
 # The egg stops this game with SIGINT, which the binary handles itself.
-exec "./${BINARY}" "${args[@]}"
+exec "${PTEROHOST_ARGS[@]}"

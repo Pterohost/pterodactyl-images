@@ -17,6 +17,9 @@
 #   STEAMCMD_EXTRA_ARGS, SBOX_EXTRA_ARGS, RUNTIME_MODE.
 set -u
 
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
+
 APPID=1892930
 STEAMCMD_SRC="${STEAMCMD_DIR:-/opt/steamcmd}"
 # Wings runs the container with a read-only root filesystem; SteamCMD self-updates
@@ -117,15 +120,43 @@ cd "$(dirname "${SERVER_EXE}")" || { echo "[sbox] FATAL: cannot cd server dir"; 
 HIDE_ADDRESS=1
 [ "${ENABLE_DIRECT_CONNECT:-0}" = "1" ] && HIDE_ADDRESS=0
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-sbox" and nothing else).
 ARGS=( +game "${GAME:-facepunch.sandbox}" )
 [ -n "${MAP:-}" ]         && ARGS+=( "${MAP}" )
 ARGS+=( +hostname "${SERVER_NAME:-Pterohost s&box Server}" )
-[ -n "${MAX_PLAYERS:-}" ] && ARGS+=( +maxplayers "${MAX_PLAYERS}" )
-ARGS+=( +net_hide_address "${HIDE_ADDRESS}" +port "${SERVER_PORT:-27015}" )
+ARGS+=( +port "${SERVER_PORT:-27015}" )
 ARGS+=( +net_query_port "${QUERY_PORT:-${SERVER_PORT:-27015}}" )
-[ -n "${TOKEN:-}" ]       && ARGS+=( +net_game_server_token "${TOKEN}" )
 
-echo "[sbox] runtime=${RUNTIME_MODE} launching $(basename "${SERVER_EXE}") ${ARGS[*]} ${SBOX_EXTRA_ARGS:-}"
+pterohost_panel_argv "$@"
+
+if [ "${PTEROHOST_FROM_PANEL}" = "1" ]; then
+    # The egg names the binary by its stock filename; the real one is wherever
+    # SteamCMD put it, and its name differs between the two depots.
+    pterohost_swap_binary ./sbox-server.exe "${SERVER_EXE}"
+    pterohost_swap_binary ./sbox-server "${SERVER_EXE}"
+else
+    PTEROHOST_ARGS=( "${SERVER_EXE}" "${ARGS[@]}" )
+fi
+
+[ -n "${MAX_PLAYERS:-}" ] && pterohost_append_if_absent +maxplayers +maxplayers "${MAX_PLAYERS}"
+
+# Derived from ENABLE_DIRECT_CONNECT rather than set directly, so it stays here
+# instead of in the startup string where the inversion would be invisible.
+pterohost_append_if_absent +net_hide_address +net_hide_address "${HIDE_ADDRESS}"
+
+# The game server token is a credential; the panel renders the startup string
+# with variable values substituted in, so it is added here instead.
+[ -n "${TOKEN:-}" ] && pterohost_append_if_absent +net_game_server_token +net_game_server_token "${TOKEN}"
+
+# A migrated egg carries {{SBOX_EXTRA_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${SBOX_EXTRA_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=( ${SBOX_EXTRA_ARGS} )
+fi
+
+echo "[sbox] runtime=${RUNTIME_MODE}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
 # ---------------------------------------------------------------------------
 # 6. Launch. exec so tini forwards SIGTERM/SIGINT straight to the server.
@@ -133,8 +164,7 @@ echo "[sbox] runtime=${RUNTIME_MODE} launching $(basename "${SERVER_EXE}") ${ARG
 case "${RUNTIME_MODE}" in
     linux)
         chmod +x "${SERVER_EXE}" 2>/dev/null || true
-        # shellcheck disable=SC2086
-        exec "${SERVER_EXE}" "${ARGS[@]}" ${SBOX_EXTRA_ARGS:-}
+        exec "${PTEROHOST_ARGS[@]}"
         ;;
     *)
         # Framework-dependent .NET 10 app: point the Windows apphost at the
@@ -142,7 +172,6 @@ case "${RUNTIME_MODE}" in
         export DOTNET_ROOT='Z:\opt\sbox-dotnet'
         export DOTNET_ROOT_X64='Z:\opt\sbox-dotnet'
         # Wine inherits the container PTY for console input.
-        # shellcheck disable=SC2086
-        exec wine "${SERVER_EXE}" "${ARGS[@]}" ${SBOX_EXTRA_ARGS:-}
+        exec wine "${PTEROHOST_ARGS[@]}"
         ;;
 esac

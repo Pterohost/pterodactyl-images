@@ -32,9 +32,12 @@ cd /home/container || exit 1
 . /usr/local/lib/pterohost/steam-update.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/kvconf.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
+BINARY="./ProjectZomboid64"
 APPID="${SRCDS_APPID:-380870}"
 BRANCH="${SRCDS_BETAID:-}"
 SERVER_NAME="${SERVER_NAME:-Pterodactyl}"
@@ -211,21 +214,38 @@ graceful_stop() {
 
 trap graceful_stop SIGTERM SIGINT
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-zomboid" and nothing else).
 args=(
     -cachedir="${ZOMBOID_DIR}"
     -port "${SERVER_PORT}"
     -servername "${SERVER_NAME}"
     -adminusername "${ADMIN_USER:-admin}"
 )
-[ -n "${STEAM_PORT:-}" ] && args+=(-udpport "${STEAM_PORT}")
-[ -n "${ADMIN_PASSWORD:-}" ] && args+=(-adminpassword "${ADMIN_PASSWORD}")
-# Deliberately unquoted: ADDITIONAL_ARGS is a user-supplied argument list.
-# shellcheck disable=SC2206
-[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+
+pterohost_panel_argv "$@"
+
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
+fi
+
+[ -n "${STEAM_PORT:-}" ] && pterohost_append_if_absent -udpport -udpport "${STEAM_PORT}"
+
+# Credentials stay out of the startup string: the panel renders it with the
+# variable values substituted in.
+[ -n "${ADMIN_PASSWORD:-}" ] && pterohost_append_if_absent -adminpassword -adminpassword "${ADMIN_PASSWORD}"
+
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # Deliberately unquoted: ADDITIONAL_ARGS is a user-supplied argument list.
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+fi
 
 log "Starting Project Zomboid (port ${SERVER_PORT}, udp ${STEAM_PORT:-unset})."
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-./ProjectZomboid64 "${args[@]}" <"${FIFO}" &
+"${PTEROHOST_ARGS[@]}" <"${FIFO}" &
 CHILD=$!
 
 # Forward panel console input into the same FIFO.
