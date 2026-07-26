@@ -122,7 +122,7 @@ All of these replace third-party images the panel could not fix. Each is a
   the next free port when the allocated one is briefly busy, while the panel
   keeps advertising the allocated port - so players cannot connect and the
   status query reads whatever else answers there. Opt out with
-  `SRCDS_STRICT_PORT=0`.
+  `SRCDS_STRICT_BIND=0`.
 - **`cs2`** - the one image not built on `steamcmd_base`. Valve builds CS2
   against the Steam Runtime 3 container and `game/cs2.sh` expects it, so this
   starts from `registry.gitlab.steamos.cloud/steamrt/sniper/platform` with
