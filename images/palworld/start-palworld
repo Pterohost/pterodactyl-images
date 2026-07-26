@@ -68,14 +68,18 @@ pal_set() {
 
     [ -f "${PAL_INI}" ] || return 0
 
+    # The delimiter is # rather than |, because the pattern below needs | as a
+    # regex alternation. With both, sed read the expression as ending at the
+    # alternation and every call failed with "unknown option to `s'" - which is
+    # why no key Palworld had already written was ever updated, on any server.
     local escaped
-    escaped="$(printf '%s' "${value}" | sed -e 's/[&|\\]/\\&/g')"
+    escaped="$(printf '%s' "${value}" | sed -e 's/[&#\\]/\\&/g')"
 
     if grep -qE "[(,]${key}=" "${PAL_INI}"; then
         # Values are either quoted strings or bare tokens up to the next , or ).
-        sed -i -E "s|([(,]${key}=)(\"[^\"]*\"|[^,)]*)|\1${escaped}|" "${PAL_INI}"
+        sed -i -E "s#([(,]${key}=)(\"[^\"]*\"|[^,)]*)#\1${escaped}#" "${PAL_INI}"
     else
-        sed -i -E "s|(OptionSettings=\()|\1${key}=${escaped},|" "${PAL_INI}"
+        sed -i -E "s#(OptionSettings=\()#\1${key}=${escaped},#" "${PAL_INI}"
     fi
 }
 
