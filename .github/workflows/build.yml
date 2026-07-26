@@ -68,6 +68,10 @@ jobs:
             dir: steamcmd-base
             # SteamCMD itself is a 32-bit x86 binary.
             platforms: linux/amd64
+          - tag: gmod_classic
+            dir: gmod-classic
+            # FROM the upstream Pterodactyl Source image, which is amd64 only.
+            platforms: linux/amd64
           - tag: cs2
             dir: cs2
             # Built on the official Steam Runtime 3 (sniper) platform rather

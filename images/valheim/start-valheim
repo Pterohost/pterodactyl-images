@@ -16,10 +16,13 @@ cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
 APPID="${SRCDS_APPID:-896660}"
+BINARY="./valheim_server.x86_64"
 
 if [ "${AUTO_UPDATE:-1}" = "1" ]; then
     pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \
@@ -45,6 +48,8 @@ fi
 export LD_LIBRARY_PATH="./linux64:${LD_LIBRARY_PATH:-}"
 export SteamAppId=892970
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-valheim" and nothing else).
 args=(
     -nographics -batchmode
     -name "${SERVER_NAME:-My Server}"
@@ -57,11 +62,23 @@ args=(
     -backuplong "${BACKUP_LONGTIME:-43200}"
 )
 
-[ -n "${PASSWORD:-}" ] && args+=(-password "${PASSWORD}")
-[ "${ENABLE_CROSSPLAY:-0}" = "1" ] && args+=(-crossplay)
+pterohost_panel_argv "$@"
 
-# shellcheck disable=SC2206
-[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
+fi
+
+[ "${ENABLE_CROSSPLAY:-0}" = "1" ] && pterohost_append_if_absent -crossplay -crossplay
+
+# Credentials stay out of the startup string: the panel renders it with the
+# variable values substituted in.
+[ -n "${PASSWORD:-}" ] && pterohost_append_if_absent -password -password "${PASSWORD}"
+
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+fi
 
 CHILD=""
 
@@ -84,13 +101,13 @@ graceful_stop() {
 trap graceful_stop SIGTERM SIGINT
 
 log "Starting Valheim '${SERVER_NAME:-My Server}' on port ${SERVER_PORT} (query $((SERVER_PORT + 1)))."
-pterohost_log_cmd ./valheim_server.x86_64 "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
 # Unity writes a lot of "(Filename: ...)" noise that drowns the console.
 if [ -n "${CONSOLE_FILTER:-}" ]; then
-    ./valheim_server.x86_64 "${args[@]}" > >(sed -uE "${CONSOLE_FILTER}") 2>&1 &
+    "${PTEROHOST_ARGS[@]}" > >(sed -uE "${CONSOLE_FILTER}") 2>&1 &
 else
-    ./valheim_server.x86_64 "${args[@]}" &
+    "${PTEROHOST_ARGS[@]}" &
 fi
 
 CHILD=$!

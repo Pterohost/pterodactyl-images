@@ -14,11 +14,14 @@ cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
 APPID="${SRCDS_APPID:-294420}"
 TELNET_PORT="${TELNET_PORT:-8081}"
+BINARY="./7DaysToDieServer.x86_64"
 
 if [ "${AUTO_UPDATE:-1}" = "1" ]; then
     pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \
@@ -32,6 +35,8 @@ fi
 export LD_LIBRARY_PATH="/home/container:${LD_LIBRARY_PATH:-}"
 mkdir -p logs
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-7dtd" and nothing else).
 args=(
     -configfile=serverconfig.xml
     -quit -batchmode -nographics -dedicated
@@ -44,17 +49,29 @@ args=(
     -logfile logs/latest.log
 )
 
-[ -n "${SERVER_DISABLED_NETWORK_PROTOCOLS:-}" ] \
-    && args+=(-ServerDisabledNetworkProtocols="${SERVER_DISABLED_NETWORK_PROTOCOLS}")
-[ -n "${PASSWORD:-}" ] && args+=(-TelnetPassword="${PASSWORD}")
+pterohost_panel_argv "$@"
 
-# shellcheck disable=SC2206
-[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
+fi
+
+[ -n "${SERVER_DISABLED_NETWORK_PROTOCOLS:-}" ] \
+    && pterohost_append_if_absent -ServerDisabledNetworkProtocols "-ServerDisabledNetworkProtocols=${SERVER_DISABLED_NETWORK_PROTOCOLS}"
+
+# The telnet password is a credential, and the console bridge below reuses it -
+# it stays here rather than in the startup string the panel renders.
+[ -n "${PASSWORD:-}" ] && pterohost_append_if_absent -TelnetPassword "-TelnetPassword=${PASSWORD}"
+
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+fi
 
 log "Starting 7 Days To Die on port ${SERVER_PORT} (telnet ${TELNET_PORT})."
-pterohost_log_cmd ./7DaysToDieServer.x86_64 "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-./7DaysToDieServer.x86_64 "${args[@]}" &
+"${PTEROHOST_ARGS[@]}" &
 CHILD=$!
 
 # Wait for the control port rather than sleeping a fixed amount - world

@@ -39,6 +39,7 @@ License: MIT
 | `zomboid` | Project Zomboid dedicated server | `steamcmd_base` | amd64 | Steam app `380870`. cgroup-aware JVM heap, RCON, save-on-stop. See below. |
 | `palworld` | Palworld dedicated server | `steamcmd_base` | amd64 | Steam app `2394010`. RCON + REST API, perf flags. See below. |
 | `gmod` | Garry's Mod (srcds) | `steamcmd_base` | amd64 | Steam app `4020`. **x86-64 branch by default**, RCON, strict port bind. |
+| `gmod_classic` | Garry's Mod (srcds) | `ghcr.io/pterodactyl/games:source` | amd64 | Upstream image plus a `start-gmod` that runs the startup command verbatim. No image-side tuning - the compatibility fallback for `gmod`. |
 | `cs2` | Counter-Strike 2 | steamrt sniper | amd64 | Steam app `730`. On the official Steam Runtime 3 platform. |
 | `sevendaystodie` | 7 Days To Die | `steamcmd_base` | amd64 | Steam app `294420`. Telnet console bridge. |
 | `valheim` | Valheim (BepInEx-aware) | `steamcmd_base` | amd64 | Steam app `896660`. SIGTERM -> SIGINT so the world saves. |
@@ -269,6 +270,85 @@ SET docker_images = REPLACE(
         'ghcr.io/pterohost/pterodactyl-images:java_25_graalvm'
 );
 ```
+
+## Launch contract
+
+Game images ship a `start-<game>` bootstrap. It used to own the whole command line, which meant
+the egg's startup field read `start-gmod` and nothing else - an owner had no way to see what
+their server actually ran with, and the variables they could edit had no visible connection to
+the flags they produced.
+
+The command line now lives in the egg, where the panel renders it with values filled in. The
+image keeps only the parts a static string cannot express. `shared/launch.sh` implements the
+contract; `shared/launch.test.sh` is its test suite (`bash shared/launch.test.sh`).
+
+**1. Pass-through.** Whatever reaches the bootstrap as `"$@"` is the command, unreordered and
+unrewritten. `start-gmod ./srcds_run -game garrysmod ...` behaves exactly like running
+`./srcds_run` by hand.
+
+**2. Prune.** A flag whose value came out empty is dropped together with that value, as is the
+Unreal `-flag=` form. That is what lets optional settings live in the visible line:
+
+```
++host_workshop_collection "{{WORKSHOP_ID}}"
+```
+
+**The quotes are load-bearing.** `shared/entrypoint.sh` eval's the startup string, so an
+unquoted empty `${WORKSHOP_ID}` disappears during word splitting and the flag swallows whatever
+argument follows it. Quoted, it arrives as an explicit empty argument the helper can see.
+
+An image that keeps a third-party entrypoint may not get that far. The upstream Pterodactyl one
+resolves `STARTUP` with `eval echo $(...)` before eval'ing the result, which flattens the string
+and drops the quotes with it - the empty value is gone and the flag is left dangling.
+`pterohost_prune_valueless_flags <keys...>` is the fallback for those images: it takes the list
+of optional flags the egg's line carries and drops any of them that ended up with no value. See
+`images/gmod-classic/start-gmod`.
+
+**3. Append-if-absent.** The image adds only what it computes (thread counts, binary selection,
+auto-detected public IP) or what a flag/value pair cannot carry (boolean switches, credentials,
+either/or blocks like Rust's map selection). It adds nothing whose flag is already in the line -
+an explicit `-threads 4` from the panel always wins.
+
+Credentials stay out of the egg on purpose: the panel substitutes variable values into the
+startup command it displays, so a GSLT or an RCON password written there becomes part of the
+shop window for no benefit.
+
+**4. Legacy fallback.** No arguments means an un-migrated server, and the bootstrap builds the
+command the old way. Image rollout and panel migration are therefore independent, and a
+hand-edited startup command never gets stranded.
+
+**5. Log.** `pterohost_log_cmd` prints the final command on every boot, so what the image
+appended on top of the startup string is never a mystery.
+
+New game images follow the same shape:
+
+```bash
+. /usr/local/lib/pterohost/launch.sh
+
+args=( ... )                       # legacy base only
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" = "1" ]; then
+    pterohost_swap_binary ./stock-name "${BINARY}"
+else
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
+fi
+
+pterohost_append_if_absent -threads -threads "${computed}"
+
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"
+```
+
+### Classic shells
+
+`gmod_classic` is the compatibility counterpart to `gmod`: the upstream
+`ghcr.io/pterodactyl/games:source` image plus a `start-gmod` that runs the startup command
+verbatim and does nothing else - no SteamCMD, no branch switching, no allocator, no thread
+sizing. It exists because switching a server to the upstream image to escape the branded
+image's tuning used to leave it unable to boot at all - the egg's startup names `start-gmod`
+and that image has none. Tuning variables it cannot honour are reported at startup rather than
+silently ignored.
 
 ## GC reference
 

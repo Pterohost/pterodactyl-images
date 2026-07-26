@@ -15,10 +15,13 @@ cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
 APPID="${SRCDS_APPID:-730}"
+BINARY="./game/cs2.sh"
 
 if [ "${SRCDS_STOP_UPDATE:-0}" != "1" ]; then
     pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${SRCDS_VALIDATE:-0}" \
@@ -29,6 +32,8 @@ else
     pterohost_steam_sdk
 fi
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-cs2" and nothing else).
 args=(
     -dedicated
     +ip "${SERVER_IP}"
@@ -37,22 +42,32 @@ args=(
     -maxplayers "${SRCDS_MAXPLAYERS:-64}"
 )
 
-# Without a Game Server Login Token the server never appears in the public
-# browser. Passing an empty one is worse than passing none.
-[ -n "${STEAM_TOKEN:-}" ] && args+=(+sv_setsteamaccount "${STEAM_TOKEN}")
+pterohost_panel_argv "$@"
 
-[ -n "${WORKSHOP_COLLECTION_ID:-}" ] && args+=(+host_workshop_collection "${WORKSHOP_COLLECTION_ID}")
-[ -n "${WORKSHOP_MAP_ID:-}" ] && args+=(+host_workshop_map "${WORKSHOP_MAP_ID}")
-
-if [ -n "${RCON_PASS:-}" ]; then
-    args+=(+rcon_password "${RCON_PASS}" -usercon)
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
 fi
 
-# shellcheck disable=SC2206
-[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+# Without a Game Server Login Token the server never appears in the public
+# browser. Passing an empty one is worse than passing none. Kept out of the
+# egg because the panel renders the startup command with values substituted in.
+[ -n "${STEAM_TOKEN:-}" ] && pterohost_append_if_absent +sv_setsteamaccount +sv_setsteamaccount "${STEAM_TOKEN}"
+
+[ -n "${WORKSHOP_COLLECTION_ID:-}" ] && pterohost_append_if_absent +host_workshop_collection +host_workshop_collection "${WORKSHOP_COLLECTION_ID}"
+[ -n "${WORKSHOP_MAP_ID:-}" ] && pterohost_append_if_absent +host_workshop_map +host_workshop_map "${WORKSHOP_MAP_ID}"
+
+if [ -n "${RCON_PASS:-}" ]; then
+    pterohost_append_if_absent +rcon_password +rcon_password "${RCON_PASS}" -usercon
+fi
+
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+fi
 
 log "Starting CS2 on ${SERVER_IP}:${SERVER_PORT} (${SRCDS_MAP:-de_dust2})."
-pterohost_log_cmd ./game/cs2.sh "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
 # cs2.sh reads console commands from stdin and the egg stops with "quit".
-exec ./game/cs2.sh "${args[@]}"
+exec "${PTEROHOST_ARGS[@]}"

@@ -12,6 +12,8 @@ cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
@@ -28,17 +30,14 @@ fi
 
 export LD_LIBRARY_PATH="/home/container/linux64:${LD_LIBRARY_PATH:-}"
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-satisfactory" and nothing else).
 args=(
     FactoryGame
     -Port="${SERVER_PORT}"
     -multihome=0.0.0.0
     -unattended
 )
-
-[ -n "${RELIABLE_PORT:-}" ] && args+=(-ReliablePort="${RELIABLE_PORT}")
-
-# shellcheck disable=SC2206
-[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
 
 # Satisfactory 1.0 ships FactoryServer.sh; older builds only had the Engine
 # binary. Prefer the wrapper when it exists - it sets up the Steam SDK paths.
@@ -52,6 +51,23 @@ fi
 if [ -z "${BINARY}" ] || [ ! -x "${BINARY}" ]; then
     log "ERROR: no Satisfactory server binary found - the install may be incomplete."
     exit 1
+fi
+
+pterohost_panel_argv "$@"
+
+if [ "${PTEROHOST_FROM_PANEL}" = "1" ]; then
+    # The egg names FactoryServer.sh; a pre-1.0 install only has the Engine one.
+    pterohost_swap_binary ./FactoryServer.sh "${BINARY}"
+else
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
+fi
+
+[ -n "${RELIABLE_PORT:-}" ] && pterohost_append_if_absent -ReliablePort "-ReliablePort=${RELIABLE_PORT}"
+
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
 fi
 
 CHILD=""
@@ -74,8 +90,8 @@ graceful_stop() {
 trap graceful_stop SIGTERM SIGINT
 
 log "Starting Satisfactory on port ${SERVER_PORT} (reliable ${RELIABLE_PORT:-unset})."
-pterohost_log_cmd "${BINARY}" "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-"${BINARY}" "${args[@]}" &
+"${PTEROHOST_ARGS[@]}" &
 CHILD=$!
 wait "${CHILD}"

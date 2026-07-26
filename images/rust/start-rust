@@ -39,6 +39,11 @@ BRANCH="$(echo "${STEAM_BRANCH:-public}" | tr '[:upper:]' '[:lower:]')"
 
 log() { printf '[rust] %s\n' "$*"; }
 
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
+
+BINARY="./RustDedicated"
+
 cd /home/container || { log "FATAL: cannot cd /home/container"; exit 1; }
 
 # Wings gives the container a small (~100 MB) /tmp tmpfs; SteamCMD stages far more
@@ -237,6 +242,9 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Assemble RustDedicated launch arguments from the environment.
 # ---------------------------------------------------------------------------
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-rust" and nothing else). Migrated servers carry the same
+# flags in their startup string, where the owner can see and edit them.
 ARGS=(-batchmode -nographics)
 ARGS+=(+server.port "${SERVER_PORT:-28015}")
 ARGS+=(+server.queryport "${QUERY_PORT:-${SERVER_PORT:-28015}}")
@@ -246,15 +254,26 @@ ARGS+=(+server.description "${DESCRIPTION:-Powered by Pterohost}")
 ARGS+=(+server.maxplayers "${MAX_PLAYERS:-40}")
 ARGS+=(+server.saveinterval "${SAVEINTERVAL:-60}")
 ARGS+=(+server.tickrate "${TICKRATE:-30}")
-[ -n "${GAMEMODE:-}" ]    && ARGS+=(+server.gamemode "${GAMEMODE}")
-[ -n "${SERVER_URL:-}" ]  && ARGS+=(+server.url "${SERVER_URL}")
-[ -n "${SERVER_IMG:-}" ]  && ARGS+=(+server.headerimage "${SERVER_IMG}")
-[ -n "${SERVER_LOGO:-}" ] && ARGS+=(+server.logoimage "${SERVER_LOGO}")
-[ -n "${SERVER_TAGS:-}" ] && ARGS+=(+server.tags "${SERVER_TAGS}")
 ARGS+=(+rcon.port "${RCON_PORT:-28016}")
-ARGS+=(+rcon.password "${RCON_PASS:-}")
-ARGS+=(+rcon.web true)
 ARGS+=(+app.port "${APP_PORT:-28082}")
+
+pterohost_panel_argv "$@"
+
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("${BINARY}" "${ARGS[@]}")
+fi
+
+[ -n "${GAMEMODE:-}" ]    && pterohost_append_if_absent +server.gamemode +server.gamemode "${GAMEMODE}"
+[ -n "${SERVER_URL:-}" ]  && pterohost_append_if_absent +server.url +server.url "${SERVER_URL}"
+[ -n "${SERVER_IMG:-}" ]  && pterohost_append_if_absent +server.headerimage +server.headerimage "${SERVER_IMG}"
+[ -n "${SERVER_LOGO:-}" ] && pterohost_append_if_absent +server.logoimage +server.logoimage "${SERVER_LOGO}"
+[ -n "${SERVER_TAGS:-}" ] && pterohost_append_if_absent +server.tags +server.tags "${SERVER_TAGS}"
+
+# rcon.web is not optional here - the console bridge below is the only way panel
+# input reaches RustDedicated, which does not read stdin. The password is a
+# credential, so neither of these belongs in the startup string.
+pterohost_append_if_absent +rcon.password +rcon.password "${RCON_PASS:-}"
+pterohost_append_if_absent +rcon.web +rcon.web true
 # Rust+ companion needs a PUBLIC IPv4. If APP_PUBLIC_IP is unset or a private
 # address (a stale internal value from the panel allocator), auto-detect the
 # node's public IPv4 - curl -4 forces IPv4 (Facepunch's connectivity test is
@@ -267,18 +286,20 @@ case "${PUBIP}" in
 esac
 case "${PUBIP}" in
     ""|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|127.*|169.254.*) ;;
-    *) ARGS+=(+app.publicip "${PUBIP}") ;;
+    *) pterohost_append_if_absent +app.publicip +app.publicip "${PUBIP}" ;;
 esac
-[ "${FPS_LIMIT:-0}" != "0" ] && ARGS+=(+fps.limit "${FPS_LIMIT}")
-[ -n "${GC_BUFFER:-}" ]      && ARGS+=(+gc.buffer "${GC_BUFFER}")
+[ "${FPS_LIMIT:-0}" != "0" ] && pterohost_append_if_absent +fps.limit +fps.limit "${FPS_LIMIT}"
+[ -n "${GC_BUFFER:-}" ]      && pterohost_append_if_absent +gc.buffer +gc.buffer "${GC_BUFFER}"
 
 # Map: custom .map URL wins; otherwise procedural (level + worldsize + seed).
+# The either/or is why this stays here rather than in the startup string - a
+# static line cannot express "these three, unless that one".
 if [ -n "${MAP_URL:-}" ]; then
-    ARGS+=(+server.levelurl "${MAP_URL}")
-else
-    ARGS+=(+server.level "${LEVEL:-Procedural Map}")
-    ARGS+=(+server.worldsize "${WORLD_SIZE:-3000}")
-    ARGS+=(+server.seed "${WORLD_SEED:-1234}")
+    pterohost_append_if_absent +server.levelurl +server.levelurl "${MAP_URL}"
+elif ! pterohost_has_flag +server.levelurl "${PTEROHOST_ARGS[@]}"; then
+    pterohost_append_if_absent +server.level +server.level "${LEVEL:-Procedural Map}"
+    pterohost_append_if_absent +server.worldsize +server.worldsize "${WORLD_SIZE:-3000}"
+    pterohost_append_if_absent +server.seed +server.seed "${WORLD_SEED:-1234}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -318,9 +339,16 @@ console_bridge() {
     # Wings detached stdin: nothing more to bridge, the server keeps running.
 }
 
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+fi
+
 log "framework=${FRAMEWORK} branch=${BRANCH} launching RustDedicated"
-# shellcheck disable=SC2086
-./RustDedicated "${ARGS[@]}" ${ADDITIONAL_ARGS:-} &
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+
+"${PTEROHOST_ARGS[@]}" &
 SERVER_PID=$!
 
 # tini -g already signals the whole process group; forward explicitly as well

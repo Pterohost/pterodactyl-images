@@ -17,6 +17,8 @@ cd /home/container || exit 1
 . /usr/local/lib/pterohost/steam-update.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/cfgconf.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
@@ -41,6 +43,8 @@ if [ -f "${CFG}" ] && [ -n "${MAX_PLAYERS:-}" ]; then
     cfg_set "${CFG}" maxPlayers "${MAX_PLAYERS}"
 fi
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-arma3" and nothing else).
 args=(
     -ip="${SERVER_IP}"
     -port="${SERVER_PORT}"
@@ -50,13 +54,25 @@ args=(
     -config=server.cfg
 )
 
-[ -n "${CLIENT_MODS:-}" ] && args+=("-mod=${CLIENT_MODS}")
-[ -n "${SERVERMODS:-}" ] && args+=("-serverMod=${SERVERMODS}")
+pterohost_panel_argv "$@"
 
-# shellcheck disable=SC2206
-[ -n "${STARTUP_PARAMS:-}" ] && args+=(${STARTUP_PARAMS})
+if [ "${PTEROHOST_FROM_PANEL}" = "1" ]; then
+    # The egg names the stock binary; SERVER_BINARY can point somewhere else.
+    pterohost_swap_binary ./arma3server_x64 "./${BINARY}"
+else
+    PTEROHOST_ARGS=("./${BINARY}" "${args[@]}")
+fi
+
+[ -n "${CLIENT_MODS:-}" ] && pterohost_append_if_absent -mod "-mod=${CLIENT_MODS}"
+[ -n "${SERVERMODS:-}" ] && pterohost_append_if_absent -serverMod "-serverMod=${SERVERMODS}"
+
+# A migrated egg carries {{STARTUP_PARAMS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${STARTUP_PARAMS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${STARTUP_PARAMS})
+fi
 
 log "Starting Arma 3 on ${SERVER_IP}:${SERVER_PORT} (query $((SERVER_PORT + 1)))."
-pterohost_log_cmd "./${BINARY}" "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-exec "./${BINARY}" "${args[@]}"
+exec "${PTEROHOST_ARGS[@]}"

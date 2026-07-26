@@ -26,6 +26,8 @@ cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
 
 log() { pterohost_log "$@"; }
 
@@ -119,6 +121,9 @@ fi
 
 export LD_LIBRARY_PATH="/home/container/.steam/sdk64:${LD_LIBRARY_PATH:-}"
 
+# The base command, used only when the panel did not supply one (an egg that
+# still reads "start-palworld" and nothing else). Migrated servers carry the
+# same flags in their startup string, where the owner can see and edit them.
 args=(
     Pal
     -port="${SERVER_PORT}"
@@ -126,21 +131,36 @@ args=(
     -servername="${SERVER_NAME:-Palworld}"
 )
 
-[ -n "${QUERY_PORT:-}" ] && args+=(-queryport="${QUERY_PORT}")
-[ -n "${MAX_PLAYERS:-}" ] && args+=(-players="${MAX_PLAYERS}")
-[ -n "${SERVER_PASSWORD:-}" ] && args+=(-serverpassword="${SERVER_PASSWORD}")
-[ -n "${PUBLIC_IP:-}" ] && args+=(-publicip="${PUBLIC_IP}")
-[ -n "${ADMIN_PASSWORD:-}" ] && args+=(-adminpassword="${ADMIN_PASSWORD}")
-[ -n "${RCON_PORT:-}" ] && args+=(-rcon)
+pterohost_panel_argv "$@"
+
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
+fi
+
+# Appended only where the startup command does not already say otherwise.
+[ -n "${QUERY_PORT:-}" ] && pterohost_append_if_absent -queryport "-queryport=${QUERY_PORT}"
+[ -n "${MAX_PLAYERS:-}" ] && pterohost_append_if_absent -players "-players=${MAX_PLAYERS}"
+[ -n "${PUBLIC_IP:-}" ] && pterohost_append_if_absent -publicip "-publicip=${PUBLIC_IP}"
+
+# Credentials stay out of the egg: the panel renders the startup command with
+# variable values substituted in.
+[ -n "${SERVER_PASSWORD:-}" ] && pterohost_append_if_absent -serverpassword "-serverpassword=${SERVER_PASSWORD}"
+[ -n "${ADMIN_PASSWORD:-}" ] && pterohost_append_if_absent -adminpassword "-adminpassword=${ADMIN_PASSWORD}"
+[ -n "${RCON_PORT:-}" ] && pterohost_append_if_absent -rcon -rcon
 
 # The documented performance trio. Opt-out exists in case a future build
 # regresses on one of them.
 if [ "${PAL_PERF_FLAGS:-1}" = "1" ]; then
-    args+=(-useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS)
+    pterohost_append_if_absent -useperfthreads -useperfthreads
+    pterohost_append_if_absent -NoAsyncLoadingThread -NoAsyncLoadingThread
+    pterohost_append_if_absent -UseMultithreadForDS -UseMultithreadForDS
 fi
 
-# shellcheck disable=SC2206
-[ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
+# A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    PTEROHOST_ARGS+=(${ADDITIONAL_ARGS})
+fi
 
 CHILD=""
 
@@ -167,8 +187,8 @@ graceful_stop() {
 trap graceful_stop SIGTERM SIGINT
 
 log "Starting Palworld (game ${SERVER_PORT}, query ${QUERY_PORT:-unset}, rcon ${RCON_PORT:-off}, rest ${REST_PORT:-off})."
-pterohost_log_cmd "${BINARY}" "${args[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-"${BINARY}" "${args[@]}" &
+"${PTEROHOST_ARGS[@]}" &
 CHILD=$!
 wait "${CHILD}"
