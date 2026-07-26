@@ -32,10 +32,12 @@ pterohost_setup_nss() {
 
     getent passwd "${uid}" >/dev/null 2>&1 && return 0
 
-    if [ ! -e "${lib}" ]; then
-        printf '\033[0;36m[pterohost]\033[0m WARN: uid %s has no passwd entry and nss_wrapper is not installed.\n' "${uid}"
-        return 0
-    fi
+    # Silently, on purpose. This entrypoint also ships in the Java, CS2 and
+    # s&box images, whose runtimes handle a NULL getpwuid() perfectly well and
+    # therefore do not carry the library. Warning there would put a line nobody
+    # can act on into a hundred-odd Minecraft consoles on every boot. An image
+    # that needs the wrapper installs it - see the README.
+    [ -e "${lib}" ] || return 0
 
     {
         cat /etc/passwd 2>/dev/null
