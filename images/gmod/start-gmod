@@ -86,6 +86,48 @@ if [ "${SERVER_LOG:-0}" = "1" ]; then
     args+=(+sv_logecho 1 +sv_logfile 1 +log on +sv_logflush 1)
 fi
 
+# ---------------------------------------------------------------------------
+# Performance.
+#
+# Be clear about what is actually on offer: Source runs its game loop on one
+# thread by design. The x86-64 branch lifts the 2 GB address-space ceiling - the
+# thing a big workshop/addon load genuinely hits - but it does not make the
+# simulation parallel. Anything promising "multithreaded srcds" is either the
+# job system below or a convar that has historically crashed GMod servers.
+# ---------------------------------------------------------------------------
+
+# The engine's job-system thread pool. Left at the engine default unless asked:
+# raising it past the useful point costs context switches without adding
+# simulation throughput.
+[ -n "${SRCDS_THREADS:-}" ] && args+=(-threads "${SRCDS_THREADS}")
+
+# Both of these are experimental and upstream ships them off, because they have
+# a long history of crashes and prediction errors on GMod specifically. They are
+# ON by default here as a deliberate Pterohost choice - set the variable to 0 to
+# roll back on a server that misbehaves; it takes effect on the next start.
+if [ "${GMOD_MCORE:-1}" = "1" ]; then
+    log "gmod_mcore_test enabled (experimental; set GMOD_MCORE=0 if the server becomes unstable)."
+    args+=(+gmod_mcore_test 1)
+fi
+
+if [ "${SV_PARALLEL:-1}" = "1" ]; then
+    log "Parallel entity packing/snapshots enabled (experimental; set SV_PARALLEL=0 to roll back)."
+    args+=(+sv_parallel_packentities 1 +sv_parallel_sendsnapshot 1)
+fi
+
+# glibc allocates an arena per thread, which inflates RSS in a memory-capped
+# container without buying throughput for this workload.
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+
+# jemalloc cuts fragmentation in a long-running, Lua-heavy, malloc-heavy
+# process - the same reason the Rust image offers it. Only valid against the
+# 64-bit binary: the library here is x86-64 and cannot preload into 32-bit
+# srcds, so guard on which binary actually got selected.
+if [ "${USE_JEMALLOC:-1}" = "1" ] && [ "${BINARY}" = "./srcds_run_x64" ] && [ -f "${JEMALLOC_LIB:-}" ]; then
+    export LD_PRELOAD="${JEMALLOC_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
+    log "jemalloc preloaded."
+fi
+
 # shellcheck disable=SC2206
 [ -n "${ADDITIONAL_ARGS:-}" ] && args+=(${ADDITIONAL_ARGS})
 

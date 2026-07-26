@@ -107,7 +107,17 @@ All of these replace third-party images the panel could not fix. Each is a
   into. `USE_64BIT_BETA=0` returns to the 32-bit build for a server that needs a
   32-bit-only binary module. Switching branch makes the next start re-download
   the server files, and if the 64-bit depot does not land the bootstrap falls
-  back to `./srcds_run` rather than failing.
+  back to `./srcds_run` rather than failing. jemalloc is preloaded on the
+  64-bit build (`USE_JEMALLOC=0` to disable) and `SRCDS_THREADS` exposes the job
+  system's pool size.
+
+  `gmod_mcore_test` and `sv_parallel_packentities`/`sv_parallel_sendsnapshot`
+  are **on by default here** (`GMOD_MCORE=0` / `SV_PARALLEL=0` to roll back).
+  Upstream ships both off because they have a long history of crashes and
+  prediction errors on GMod specifically - this is a deliberate Pterohost
+  default, not a safe upstream one. Source's game loop is single-threaded by
+  design; the x86-64 branch lifts the address-space ceiling, not that.
+
   Also adds `-strictportbind`: without it srcds silently walks to
   the next free port when the allocated one is briefly busy, while the panel
   keeps advertising the allocated port - so players cannot connect and the
