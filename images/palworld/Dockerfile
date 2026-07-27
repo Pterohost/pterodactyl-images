@@ -26,9 +26,17 @@ ENV PTEROHOST_IMAGE=palworld \
     SRCDS_APPID=2394010
 
 COPY --chmod=755 images/palworld/start-palworld /usr/local/bin/start-palworld
+# Which egg variable writes which OptionSettings key, and with what formatting.
+# Kept out of the script so adding a setting is a line here plus a variable on
+# the egg.
+COPY --chmod=644 shared/palworld-keys.tsv /etc/pterohost/palworld-keys.tsv
 
 USER container
 WORKDIR /home/container
 
-ENTRYPOINT ["/usr/bin/tini","-g","--"]
+# tini without -g on purpose. With -g it forwards Wings SIGTERM to the whole
+# process group, so the game gets it at the same instant as the bootstrap and
+# dies before the trap can save the world. Without it only the bootstrap is
+# signalled and the graceful stop below stays in control.
+ENTRYPOINT ["/usr/bin/tini","--"]
 CMD ["/bin/bash","/entrypoint.sh"]
