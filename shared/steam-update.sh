@@ -78,6 +78,9 @@ pterohost_steam_update() {
     # Settle SteamCMD's own self-update first.
     "${STEAMCMD_RUN}/steamcmd.sh" +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 +quit >/dev/null 2>&1 || true
 
+    local log_file
+    log_file="$(mktemp 2>/dev/null || echo "/tmp/pterohost-steamcmd.$$")"
+
     while [ "${attempt}" -le "${max_attempts}" ]; do
         pterohost_log "SteamCMD attempt ${attempt}/${max_attempts}..."
         timeout "${STEAMCMD_TIMEOUT:-1800}" "${STEAMCMD_RUN}/steamcmd.sh" \
@@ -85,12 +88,31 @@ pterohost_steam_update() {
             +force_install_dir /home/container \
             "${login_args[@]}" \
             +app_update "${appid}" "${branch_args[@]}" "${validate_arg[@]}" \
-            +quit || true
+            +quit 2>&1 | tee "${log_file}" || true
 
         if [ -e "${sentinel}" ]; then
             pterohost_log "SteamCMD update OK."
             pterohost_steam_sdk
+            rm -f "${log_file}"
             return 0
+        fi
+
+        # A branch name that does not exist is not a transient failure, and
+        # retrying it changes nothing. SteamCMD prints "Failed to set beta 'x'"
+        # and then downloads NOTHING, so the server starts with no binary and
+        # exits 127. That is how one paid Project Zomboid server sat dead for
+        # five days and another customer could not switch to build 42: the
+        # console said "Starting server..." and nothing explained why it was not.
+        if [ -n "${branch}" ] && grep -qi "Failed to set beta" "${log_file}" 2>/dev/null; then
+            pterohost_log "ERROR: Steam has no branch named '${branch}' for app ${appid} - nothing was downloaded."
+            pterohost_log "       Check the branch variable in the panel. For Project Zomboid build 42 it is 'unstable'; an empty value means the current stable release."
+            if [ "${STEAM_BRANCH_FALLBACK:-1}" = "1" ]; then
+                pterohost_log "       Falling back to the default branch so the server still comes up."
+                branch=""
+                branch_args=()
+                continue
+            fi
+            break
         fi
 
         pterohost_log "attempt ${attempt} did not produce ${sentinel} (transient?); retrying..."
@@ -98,6 +120,7 @@ pterohost_steam_update() {
         sleep 5
     done
 
+    rm -f "${log_file}"
     pterohost_log "WARN: ${sentinel} missing after ${max_attempts} attempts - continuing with existing files."
     pterohost_steam_sdk
     return 1
