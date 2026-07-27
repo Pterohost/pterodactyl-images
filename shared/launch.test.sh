@@ -106,5 +106,16 @@ check "has_flag finds a bare flag" "yes" "${r}"
 pterohost_has_flag -threads ./srcds_run -tickrate 22 && r=yes || r=no
 check "has_flag does not match a prefix of another flag" "no" "${r}"
 
+# --- rule 5: the printed command must not leak credentials ----------------
+printed="$(pterohost_log_cmd ./srcds_run -game garrysmod +rcon_password hunter2 \
+    +sv_setsteamaccount GSLTTOKEN -adminpassword=plaintext +map gm_flatgrass 2>&1)"
+check "rcon password not printed" "" "$(printf '%s' "${printed}" | grep -o hunter2)"
+check "gslt not printed" "" "$(printf '%s' "${printed}" | grep -o GSLTTOKEN)"
+check "flag=value secret not printed" "" "$(printf '%s' "${printed}" | grep -o plaintext)"
+check "non secret arguments still printed" "gm_flatgrass" \
+    "$(printf '%s' "${printed}" | grep -o gm_flatgrass)"
+check "secret flag itself still visible" "+rcon_password" \
+    "$(printf '%s' "${printed}" | grep -o '+rcon_password')"
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

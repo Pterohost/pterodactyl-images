@@ -105,8 +105,33 @@ fi
 
 # RCON is how the panel enriches the player list with SteamIDs and IPs. Also a
 # credential, so it stays here rather than in the egg.
+#
+# The command line is not the last word, though: server.cfg is executed after
+# it, so an rcon_password there wins. An empty one there - which a support reply
+# once talked a customer into adding - silently turns RCON off entirely and then
+# the panel's retries get its own IP rcon-banned, which is what fills the
+# customer's console with failures. We comment that specific case out, and only
+# warn when the owner has deliberately set a different password of their own.
+gmod_check_server_cfg_rcon() {
+    local cfg="/home/container/garrysmod/cfg/server.cfg" current
+
+    [ -f "${cfg}" ] || return 0
+    grep -qE '^[[:space:]]*rcon_password([[:space:]]|$)' "${cfg}" || return 0
+
+    current="$(grep -E '^[[:space:]]*rcon_password([[:space:]]|$)' "${cfg}" | head -1 \
+        | sed -E 's/^[[:space:]]*rcon_password[[:space:]]*//; s/^"//; s/"[[:space:]]*$//; s/[[:space:]]*$//')"
+
+    if [ -z "${current}" ]; then
+        sed -i -E 's/^([[:space:]]*rcon_password([[:space:]]|$).*)$/\/\/ \1 \/\/ disabled by Pterohost: an empty rcon_password turns RCON off/' "${cfg}"
+        log "server.cfg had an empty rcon_password, which disables RCON entirely - the line has been commented out and the panel password is used instead."
+    elif [ "${current}" != "${RCON_PASS:-}" ]; then
+        log "NOTE: garrysmod/cfg/server.cfg sets its own rcon_password. server.cfg runs after the command line, so THAT password is the live one, not the panel's. Remove the line to let the panel own it."
+    fi
+}
+
 if [ -n "${RCON_PASS:-}" ]; then
     pterohost_append_if_absent +rcon_password +rcon_password "${RCON_PASS}" -usercon
+    gmod_check_server_cfg_rcon
 fi
 
 [ -n "${NET_PUBLIC_IP:-}" ] && pterohost_append_if_absent +net_public_adr +net_public_adr "${NET_PUBLIC_IP}"
@@ -137,32 +162,43 @@ fi
 # of job threads fighting over a 200% quota: pure context-switching, and the
 # cgroup throttles the lot. That is the single most common way a "tuned" Source
 # server ends up slower than an untuned one.
+#
+# The quota is read in thousandths of a core rather than whole cores. Rounding
+# to an integer first turned every plan below one core into "0", which then read
+# as "no quota at all" and fell through to nproc - so the SMALLEST plans on the
+# fleet were the ones handed -threads 8 on a 12-core node, the exact failure
+# this function exists to prevent.
 srcds_auto_threads() {
-    local quota=""
+    local milli=""
 
     # cgroup v2, then v1.
     if [ -r /sys/fs/cgroup/cpu.max ]; then
         read -r q p < /sys/fs/cgroup/cpu.max 2>/dev/null
         if [ "${q}" != "max" ] && [ -n "${q}" ] && [ -n "${p}" ] && [ "${p}" -gt 0 ] 2>/dev/null; then
-            quota=$(awk -v q="${q}" -v p="${p}" 'BEGIN{printf "%d", int(q/p)}')
+            milli=$(awk -v q="${q}" -v p="${p}" 'BEGIN{printf "%d", (q * 1000) / p}')
         fi
     elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ] && [ -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]; then
         q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null)
         p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null)
         if [ -n "${q}" ] && [ "${q}" -gt 0 ] 2>/dev/null && [ -n "${p}" ] && [ "${p}" -gt 0 ] 2>/dev/null; then
-            quota=$(awk -v q="${q}" -v p="${p}" 'BEGIN{printf "%d", int(q/p)}')
+            milli=$(awk -v q="${q}" -v p="${p}" 'BEGIN{printf "%d", (q * 1000) / p}')
         fi
     fi
 
     # No quota at all (unlimited plan): fall back to host cores, still capped.
-    if [ -z "${quota}" ] || [ "${quota}" -lt 1 ] 2>/dev/null; then
-        quota=$(nproc 2>/dev/null || echo 1)
+    if [ -z "${milli}" ] || [ "${milli}" -lt 1 ] 2>/dev/null; then
+        milli=$(( $(nproc 2>/dev/null || echo 1) * 1000 ))
     fi
 
     # Source gets nothing from a large pool; past a handful of threads it is all
-    # overhead. One thread is left for the main game loop.
-    local threads=$(( quota > 1 ? quota - 1 : 1 ))
+    # overhead. One thread is left for the main game loop, and anything under two
+    # cores gets a single job thread rather than a pool it cannot run.
+    local threads=1
+    if [ "${milli}" -ge 2000 ]; then
+        threads=$(( milli / 1000 - 1 ))
+    fi
     [ "${threads}" -gt 8 ] && threads=8
+    [ "${threads}" -lt 1 ] && threads=1
 
     echo "${threads}"
 }

@@ -1,0 +1,63 @@
+# Pterohost: egg variable -> PalWorldSettings OptionSettings key.
+#
+# Everything the panel is allowed to own lives here rather than in the
+# bootstrap, so adding a setting is a line in this file and a variable on the
+# egg. Keys absent from this table are never touched: they belong to the owner.
+#
+# Columns:  ENV_VARIABLE <TAB> OptionSettingsKey <TAB> type
+#
+# type:
+#   str    quoted; a double quote in the value is dropped, since the format has
+#          no escape for it and an unbalanced quote breaks the whole tuple
+#   int    bare integer
+#   float  bare float, normalised to six decimals - Palworld writes 1.000000 and
+#          the parsers around it have historically rejected a bare "1"
+#   bool   bare True/False
+#   raw    written exactly as given (enums such as None/Casual/Normal/Hard)
+#
+# Ports and RCON/REST switches are set by start-palworld itself: they follow the
+# panel's allocations rather than a variable the customer can retype.
+#
+# Deliberately NOT mapped:
+#   ALLOW_CONNECT_PLATFORM -> CrossplayPlatforms. The egg offers a single
+#   platform while the game takes a tuple, so making it live today would cut
+#   Xbox players off servers that accept them now. Needs a multi-select on the
+#   egg first.
+
+SERVER_NAME	ServerName	str
+SERVER_DESCRIPTION	ServerDescription	str
+SERVER_PASSWORD	ServerPassword	str
+ADMIN_PASSWORD	AdminPassword	str
+MAX_PLAYERS	ServerPlayerMaxNum	int
+PUBLIC_IP	PublicIP	str
+
+DIFFICULTY	Difficulty	raw
+DEATH_PENALTY	DeathPenalty	raw
+
+DAY_TIME_SPEED_RATE	DayTimeSpeedRate	float
+NIGHT_TIME_SPEED_RATE	NightTimeSpeedRate	float
+EXP_RATE	ExpRate	float
+PAL_CAPTURE_RATE	PalCaptureRate	float
+PAL_SPAWN_NUM_RATE	PalSpawnNumRate	float
+PAL_DAMAGE_RATE_ATTACK	PalDamageRateAttack	float
+PAL_DAMAGE_RATE_DEFENSE	PalDamageRateDefense	float
+PLAYER_DAMAGE_RATE_ATTACK	PlayerDamageRateAttack	float
+PLAYER_DAMAGE_RATE_DEFENSE	PlayerDamageRateDefense	float
+COLLECTION_DROP_RATE	CollectionDropRate	float
+ENEMY_DROP_ITEM_RATE	EnemyDropItemRate	float
+WORK_SPEED_RATE	WorkSpeedRate	float
+ITEM_WEIGHT_RATE	ItemWeightRate	float
+PAL_EGG_DEFAULT_HATCHING_TIME	PalEggDefaultHatchingTime	float
+
+ENABLE_PLAYER_TO_PLAYER_DAMAGE	bEnablePlayerToPlayerDamage	bool
+ENABLE_FRIENDLY_FIRE	bEnableFriendlyFire	bool
+IS_PVP	bIsPvP	bool
+ENABLE_FAST_TRAVEL	bEnableFastTravel	bool
+HARDCORE	bHardcore	bool
+PAL_LOST	bPalLost	bool
+
+GUILD_PLAYER_MAX_NUM	GuildPlayerMaxNum	int
+BASE_CAMP_MAX_NUM_IN_GUILD	BaseCampMaxNumInGuild	int
+BASE_CAMP_WORKER_MAX_NUM	BaseCampWorkerMaxNum	int
+BASE_CAMP_MAX_NUM	BaseCampMaxNum	int
+DROP_ITEM_MAX_NUM	DropItemMaxNum	int
