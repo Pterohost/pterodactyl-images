@@ -37,5 +37,9 @@ COPY --chmod=755 images/zomboid/start-zomboid /usr/local/bin/start-zomboid
 USER container
 WORKDIR /home/container
 
-ENTRYPOINT ["/usr/bin/tini","-g","--"]
+# tini without -g on purpose. With -g it forwards Wings SIGTERM to the whole
+# process group, so the game gets it at the same instant as the bootstrap and
+# dies before the trap can save the world. Without it only the bootstrap is
+# signalled and the graceful stop below stays in control.
+ENTRYPOINT ["/usr/bin/tini","--"]
 CMD ["/bin/bash","/entrypoint.sh"]
