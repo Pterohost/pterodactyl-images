@@ -9,8 +9,11 @@
 #    a JVM that believes it may grow to 8 GB and gets OOM-killed by the cgroup,
 #    while a 16 GB plan silently caps itself at 8. Passing -Xmx on the command
 #    line does nothing, which is why the usual advice to edit start-server.sh
-#    has no effect. We rewrite vmArgs from SERVER_MEMORY instead, and set
-#    -Xms == -Xmx so the JVM stops resizing the heap during play.
+#    has no effect. We rewrite vmArgs from SERVER_MEMORY instead: -Xmx is the
+#    plan and -Xms is 128 MB, the same arithmetic the Minecraft eggs use. -Xms
+#    used to be pinned equal to -Xmx, which committed the whole plan on the
+#    first second: the panel showed 84-96% memory before anyone joined and a
+#    node carrying three 24 GB worlds ran out for real.
 #
 # 2. RCON. Project Zomboid answers A2S but its A2S_PLAYER response carries no
 #    names, so the panel can only list players over RCON - and RCON is
@@ -20,7 +23,11 @@
 #
 # 3. Graceful shutdown. Zomboid does read stdin, so "quit" saves the world
 #    properly - but only if SIGTERM is turned into that command rather than
-#    killing the JVM outright.
+#    killing the JVM outright, AND only if something is still listening on the
+#    console. The forwarder that carries it used to be a background job reading
+#    plain stdin, which the shell hands /dev/null: it exited instantly, the
+#    console was write-only, and every stop ran to the Wings timeout and ended
+#    in SIGKILL with the world unsaved.
 #
 # Every step is non-fatal: a Steam or Workshop hiccup logs a warning and boots
 # with the files already on disk.
