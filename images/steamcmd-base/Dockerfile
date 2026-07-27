@@ -79,9 +79,15 @@ COPY --chmod=755 shared/launch.sh /usr/local/lib/pterohost/launch.sh
 COPY --chmod=755 shared/kvconf.sh /usr/local/lib/pterohost/kvconf.sh
 COPY --chmod=755 shared/cfgconf.sh /usr/local/lib/pterohost/cfgconf.sh
 COPY --chmod=755 shared/workshop.sh /usr/local/lib/pterohost/workshop.sh
+COPY --chmod=755 shared/unrealini.sh /usr/local/lib/pterohost/unrealini.sh
+COPY --chmod=644 shared/unrealini.awk /usr/local/lib/pterohost/unrealini.awk
 COPY shared/motd.txt /motd.txt
 COPY shared/nodes.tsv /etc/pterohost/nodes.tsv
 USER container
 
-ENTRYPOINT ["/usr/bin/tini","-g","--"]
+# tini without -g on purpose. With -g it forwards Wings' SIGTERM to the whole
+# process group, so the game gets it at the same instant as the bootstrap and
+# dies before the trap can save the world. Without it only the bootstrap is
+# signalled and the images that implement a graceful stop stay in control.
+ENTRYPOINT ["/usr/bin/tini","--"]
 CMD ["/bin/bash","/entrypoint.sh"]

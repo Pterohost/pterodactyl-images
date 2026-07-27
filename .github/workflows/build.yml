@@ -21,8 +21,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The contract tests take seconds and cover the two helpers every image
+  # depends on: the launch-line assembler and the Unreal tuple rewriter. Both
+  # have already shipped a bug that only surfaced on a customer's server, so
+  # nothing gets built until they pass.
+  test:
+    name: "shell contract tests"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: shared/launch.test.sh
+        run: bash shared/launch.test.sh
+
+      - name: shared/unrealini.test.sh
+        run: bash shared/unrealini.test.sh
+
+      - name: shared/workshop.test.sh
+        run: bash shared/workshop.test.sh
+
   build:
     name: "${{ matrix.tag }}"
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

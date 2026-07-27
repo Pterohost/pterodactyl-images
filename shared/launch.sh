@@ -182,14 +182,55 @@ pterohost_append_if_absent() {
     PTEROHOST_ARGS+=("$@")
 }
 
+# Flags whose value is a credential. The whole point of appending these in the
+# image rather than writing them into the egg's startup string is that they stay
+# out of sight - printing the resolved command then handed them straight back to
+# the console, where the server log and every screenshot a customer sends to
+# support carries the RCON password and the GSLT.
+PTEROHOST_SECRET_FLAGS="${PTEROHOST_SECRET_FLAGS:-+rcon_password +sv_setsteamaccount +rcon.password -adminpassword -serverpassword -password +sv_password +sv_downloadurl_password}"
+
+# pterohost_is_secret_flag <flag>
+pterohost_is_secret_flag() {
+    case " ${PTEROHOST_SECRET_FLAGS} " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
 # pterohost_log_cmd <binary> <args...>
 #   Rule 5. Print the fully resolved launch command into the panel console, so
-#   what the image appended on top of the startup string is never a mystery.
+#   what the image appended on top of the startup string is never a mystery -
+#   with credential values replaced by a placeholder.
 pterohost_log_cmd() {
     local binary="$1"; shift
+    local arg previous="" head
+
     printf '\033[0;36m[pterohost]\033[0m Launch command:\n'
     printf '  \033[1m%s\033[0m' "${binary}"
-    printf ' %s' "$@"
+
+    for arg in "$@"; do
+        if [ -n "${previous}" ] && pterohost_is_secret_flag "${previous}"; then
+            printf ' %s' '<hidden>'
+            previous="${arg}"
+            continue
+        fi
+
+        # "-adminpassword=secret" - the value rides on the flag itself.
+        case "${arg}" in
+            -*=*|+*=*)
+                head="${arg%%=*}"
+                if pterohost_is_secret_flag "${head}"; then
+                    printf ' %s=%s' "${head}" '<hidden>'
+                    previous="${arg}"
+                    continue
+                fi
+                ;;
+        esac
+
+        printf ' %s' "${arg}"
+        previous="${arg}"
+    done
+
     printf '\n'
     printf '\033[2m  Add your own flags with the ADDITIONAL_ARGS variable in the server settings.\033[0m\n'
 }
