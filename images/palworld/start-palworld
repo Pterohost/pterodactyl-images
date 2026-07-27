@@ -3,23 +3,46 @@
 #
 # Why this image exists:
 #
-# 1. QUERY. Palworld answers no Valve A2S on any port - verified by sweeping
-#    the game port, +1, +2, +24714, QUERY_PORT, RCON_PORT and every allocation
-#    on running servers. The only ways to read its state are RCON and the REST
-#    API, and both are configured exclusively inside PalWorldSettings.ini.
-#    The REST API is the richer of the two (player names, ping, level, server
-#    FPS, uptime, in-game days), so this image turns it on and points it at an
-#    allocated port.
+# 1. THE SETTINGS ACTUALLY REACHING THE SERVER. Palworld keeps every setting in
+#    one Unreal tuple inside PalWorldSettings.ini, and three separate things
+#    used to stop a panel value from arriving:
 #
-# 2. LATENCY. -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS are the
+#      a. the third-party PalworldServerConfigParser the old egg shipped ends
+#         the replaced value at the first comma AFTER THE KEY, so a name or
+#         description containing a comma grew one duplicated tail per boot until
+#         the quotes no longer balanced. Two live servers had been rewriting
+#         themselves for weeks, one of them cut off mid-value with no closing
+#         parenthesis at all. We no longer run it; shared/unrealini.awk owns the
+#         tuple and repairs that damage on the way past.
+#
+#      b. WorldOption.sav. When a world is uploaded from the client, or was
+#         created before the panel set a value, Palworld takes the world's
+#         settings from Pal/Saved/SaveGames/0/<id>/WorldOption.sav and ignores
+#         PalWorldSettings.ini completely - including AdminPassword, which then
+#         stays EMPTY. Seven servers on this fleet were in that state: the panel
+#         showed one admin password, the server accepted a blank one from
+#         anybody who could reach the RCON port, and every settings change the
+#         customer made did nothing. The file is renamed aside (never deleted)
+#         so the panel is the single source of truth; PAL_KEEP_WORLD_OPTION=1
+#         restores the old behaviour for a server that wants it.
+#
+#      c. a sed whose delimiter collided with its own alternation, so no
+#         existing key was ever updated. The tuple writer replaced it.
+#
+# 2. STOPPING. Palworld does not read stdin, so the egg's stop command has to
+#    arrive as a signal and the shutdown itself has to go over RCON. The old egg
+#    had a stdin->RCON bridge and the first version of this image dropped it,
+#    which is why Stop hung until Wings killed the process.
+#
+# 3. QUERY. Palworld answers no Valve A2S on any port - verified by sweeping the
+#    game port, +1, +2, +24714, QUERY_PORT, RCON_PORT and every allocation on
+#    running servers. RCON and the REST API are the only ways to read its state.
+#
+# 4. LATENCY. -useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS are the
 #    three flags Pocketpair documents for dedicated servers; they cost nothing
 #    and improve CPU utilisation on a game that is otherwise brutally
 #    single-thread bound. jemalloc is available as an opt-in preload because
 #    UE5 servers fragment the default allocator over long uptimes.
-#
-# The ini is only touched for the keys the panel owns (ports, RCON/REST,
-# admin password, slot count). Gameplay settings stay exactly as the owner
-# left them.
 
 set -u
 cd /home/container || exit 1
@@ -28,12 +51,20 @@ cd /home/container || exit 1
 . /usr/local/lib/pterohost/steam-update.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/kvconf.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/unrealini.sh
 
 log() { pterohost_log "$@"; }
 
 APPID="${SRCDS_APPID:-2394010}"
 BINARY="/home/container/Pal/Binaries/Linux/PalServer-Linux-Shipping"
-PAL_INI="/home/container/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini"
+PAL_CONFIG_DIR="/home/container/Pal/Saved/Config/LinuxServer"
+PAL_INI="${PAL_CONFIG_DIR}/PalWorldSettings.ini"
+PAL_DEFAULTS="/home/container/DefaultPalWorldSettings.ini"
+PAL_KEYS="/etc/pterohost/palworld-keys.tsv"
+SAVE_DIR="/home/container/Pal/Saved/SaveGames/0"
 
 # ---------------------------------------------------------------------------
 # 1. Update via anonymous SteamCMD.
@@ -47,76 +78,117 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Let the egg's own config parser run first when it is present, so servers
-#    migrating from the third-party image keep their existing behaviour. We
-#    then patch only the keys it does not manage.
+# 2. A settings file we can actually write to.
+#
+# A server whose install was interrupted ends up with an empty or truncated
+# PalWorldSettings.ini - one volume on this fleet holds a single byte. Seeding
+# it from the shipped defaults costs nothing and turns "no setting works" into
+# a normal boot.
 # ---------------------------------------------------------------------------
-if [ -x /home/container/PalworldServerConfigParser ]; then
-    log "Running PalworldServerConfigParser..."
+mkdir -p "${PAL_CONFIG_DIR}"
+
+if [ ! -s "${PAL_INI}" ] || ! grep -q "OptionSettings" "${PAL_INI}" 2>/dev/null; then
+    if [ -s "${PAL_DEFAULTS}" ] && grep -q "OptionSettings" "${PAL_DEFAULTS}" 2>/dev/null; then
+        log "No usable PalWorldSettings.ini - seeding it from DefaultPalWorldSettings.ini."
+        cp -f "${PAL_DEFAULTS}" "${PAL_INI}"
+    else
+        log "WARN: neither PalWorldSettings.ini nor DefaultPalWorldSettings.ini is usable; the server boots on built-in defaults."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 3. WorldOption.sav - see point 1b in the header.
+# ---------------------------------------------------------------------------
+if [ "${PAL_KEEP_WORLD_OPTION:-0}" != "1" ] && [ -d "${SAVE_DIR}" ]; then
+    find "${SAVE_DIR}" -maxdepth 2 -name 'WorldOption.sav' 2>/dev/null | while IFS= read -r world_option; do
+        [ -n "${world_option}" ] || continue
+        if mv -f "${world_option}" "${world_option}.pterohost-disabled" 2>/dev/null; then
+            log "WorldOption.sav in the save was overriding every panel setting - including the admin/RCON password - and has been moved aside. Settings now come from the panel; set PAL_KEEP_WORLD_OPTION=1 to keep the world's own copy instead."
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Write the settings the panel owns.
+#
+# The mapping lives in /etc/pterohost/palworld-keys.tsv, so adding a setting is
+# one line there plus a variable on the egg. Values are formatted per the
+# declared type: Palworld writes its rates as 1.000000 and the parsers around it
+# have rejected a bare "1".
+# ---------------------------------------------------------------------------
+apply_settings() {
+    local env_name key type value
+
+    unreal_begin
+
+    if [ -f "${PAL_KEYS}" ]; then
+        while IFS=$'\t' read -r env_name key type; do
+            case "${env_name}" in ''|\#*) continue ;; esac
+            [ -n "${key}" ] || continue
+
+            eval "value=\${${env_name}:-}"
+            [ -n "${value}" ] || continue
+
+            case "${type}" in
+                str)
+                    unreal_str "${key}" "${value}"
+                    ;;
+                float)
+                    case "${value}" in
+                        *.*) unreal_set "${key}" "${value}" ;;
+                        *)   unreal_set "${key}" "${value}.000000" ;;
+                    esac
+                    ;;
+                *)
+                    unreal_set "${key}" "${value}"
+                    ;;
+            esac
+        done < "${PAL_KEYS}"
+    else
+        log "WARN: ${PAL_KEYS} missing - only the ports and RCON will be written."
+    fi
+
+    # Ports and switches follow the panel's allocations, not a typed-in value.
+    unreal_set PublicPort "${SERVER_PORT}"
+
+    if [ -n "${RCON_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+        unreal_set RCONEnabled True
+        unreal_set RCONPort "${RCON_PORT}"
+        log "RCON enabled on port ${RCON_PORT}."
+    else
+        log "RCON not configured (RCON_PORT/ADMIN_PASSWORD unset) - the panel cannot list players and Stop cannot shut the server down cleanly."
+    fi
+
+    # The REST API carries names, ping, level, server FPS and uptime; RCON
+    # carries only names. Enabled solely when the egg allocated a port for it,
+    # so we never squat a port the panel did not hand out.
+    if [ -n "${REST_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+        unreal_set RESTAPIEnabled True
+        unreal_set RESTAPIPort "${REST_PORT}"
+        log "REST API enabled on port ${REST_PORT}."
+    else
+        log "REST_PORT unset - the panel falls back to RCON for player data."
+    fi
+
+    kv_backup_once "${PAL_INI}" settings
+
+    unreal_apply "${PAL_INI}"
+    case $? in
+        0) log "Server settings written from the panel." ;;
+        1) log "Server settings already match the panel." ;;
+        *) log "WARN: could not write PalWorldSettings.ini - the server keeps its current settings." ;;
+    esac
+}
+
+if [ "${PAL_LEGACY_PARSER:-0}" = "1" ] && [ -x /home/container/PalworldServerConfigParser ]; then
+    log "PAL_LEGACY_PARSER=1 - running the third-party config parser (known to corrupt any value containing a comma)."
     ./PalworldServerConfigParser || log "WARN: config parser exited non-zero; continuing."
 fi
 
-# ---------------------------------------------------------------------------
-# 3. Patch PalWorldSettings.ini.
-#
-# The file is not a flat key=value config: it is an Unreal ini holding one
-# giant OptionSettings=(Key=Value,Key=Value,...) tuple, so the generic kvconf
-# helper does not apply here.
-# ---------------------------------------------------------------------------
-pal_set() {
-    local key="$1" value="$2"
-
-    [ -f "${PAL_INI}" ] || return 0
-
-    # The delimiter is # rather than |, because the pattern below needs | as a
-    # regex alternation. With both, sed read the expression as ending at the
-    # alternation and every call failed with "unknown option to `s'" - which is
-    # why no key Palworld had already written was ever updated, on any server.
-    local escaped
-    escaped="$(printf '%s' "${value}" | sed -e 's/[&#\\]/\\&/g')"
-
-    if grep -qE "[(,]${key}=" "${PAL_INI}"; then
-        # Values are either quoted strings or bare tokens up to the next , or ).
-        sed -i -E "s#([(,]${key}=)(\"[^\"]*\"|[^,)]*)#\1${escaped}#" "${PAL_INI}"
-    else
-        sed -i -E "s#(OptionSettings=\()#\1${key}=${escaped},#" "${PAL_INI}"
-    fi
-}
-
-if [ ! -f "${PAL_INI}" ]; then
-    log "WARN: ${PAL_INI} not found - Palworld writes it on first boot. Re-run to apply RCON/REST settings."
-else
-    cp -a "${PAL_INI}" "${PAL_INI}.pterohost-orig" 2>/dev/null || true
-
-    # RCON: the fallback path the panel uses for the player list.
-    if [ -n "${RCON_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
-        pal_set RCONEnabled True
-        pal_set RCONPort "${RCON_PORT}"
-        log "RCON enabled on port ${RCON_PORT}."
-    fi
-
-    # REST API: the richer path (names, ping, level, fps, uptime, in-game days).
-    # Only enabled when the egg allocated a dedicated port for it - never
-    # squatting on a port the panel did not hand out.
-    if [ -n "${REST_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
-        pal_set RESTAPIEnabled True
-        pal_set RESTAPIPort "${REST_PORT}"
-        log "REST API enabled on port ${REST_PORT}."
-    else
-        log "REST_PORT unset - the panel will fall back to RCON for player data."
-    fi
-
-    [ -n "${ADMIN_PASSWORD:-}" ] && pal_set AdminPassword "\"${ADMIN_PASSWORD}\""
-    [ -n "${SERVER_PASSWORD:-}" ] && pal_set ServerPassword "\"${SERVER_PASSWORD}\""
-    [ -n "${SERVER_NAME:-}" ] && pal_set ServerName "\"${SERVER_NAME}\""
-    [ -n "${SERVER_DESCRIPTION:-}" ] && pal_set ServerDescription "\"${SERVER_DESCRIPTION}\""
-    [ -n "${MAX_PLAYERS:-}" ] && pal_set ServerPlayerMaxNum "${MAX_PLAYERS}"
-    pal_set PublicPort "${SERVER_PORT}"
-    [ -n "${PUBLIC_IP:-}" ] && pal_set PublicIP "\"${PUBLIC_IP}\""
-fi
+apply_settings
 
 # ---------------------------------------------------------------------------
-# 4. Launch.
+# 5. Launch.
 # ---------------------------------------------------------------------------
 if [ "${USE_JEMALLOC:-0}" = "1" ] && [ -f "${JEMALLOC_LIB:-}" ]; then
     export LD_PRELOAD="${JEMALLOC_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
@@ -126,8 +198,7 @@ fi
 export LD_LIBRARY_PATH="/home/container/.steam/sdk64:${LD_LIBRARY_PATH:-}"
 
 # The base command, used only when the panel did not supply one (an egg that
-# still reads "start-palworld" and nothing else). Migrated servers carry the
-# same flags in their startup string, where the owner can see and edit them.
+# still reads "start-palworld" and nothing else).
 args=(
     Pal
     -port="${SERVER_PORT}"
@@ -146,12 +217,6 @@ fi
 [ -n "${MAX_PLAYERS:-}" ] && pterohost_append_if_absent -players "-players=${MAX_PLAYERS}"
 [ -n "${PUBLIC_IP:-}" ] && pterohost_append_if_absent -publicip "-publicip=${PUBLIC_IP}"
 
-# Credentials stay out of the egg: the panel renders the startup command with
-# variable values substituted in.
-[ -n "${SERVER_PASSWORD:-}" ] && pterohost_append_if_absent -serverpassword "-serverpassword=${SERVER_PASSWORD}"
-[ -n "${ADMIN_PASSWORD:-}" ] && pterohost_append_if_absent -adminpassword "-adminpassword=${ADMIN_PASSWORD}"
-[ -n "${RCON_PORT:-}" ] && pterohost_append_if_absent -rcon -rcon
-
 # The documented performance trio. Opt-out exists in case a future build
 # regresses on one of them.
 if [ "${PAL_PERF_FLAGS:-1}" = "1" ]; then
@@ -160,6 +225,11 @@ if [ "${PAL_PERF_FLAGS:-1}" = "1" ]; then
     pterohost_append_if_absent -UseMultithreadForDS -UseMultithreadForDS
 fi
 
+# -adminpassword / -serverpassword / -rcon are deliberately NOT appended.
+# Palworld ignores them - a server launched with -adminpassword=X still refuses
+# X over RCON when the ini says otherwise, verified on a live server - and
+# appending them only printed the credentials into the customer's console.
+
 # A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
 if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
     # shellcheck disable=SC2206
@@ -167,25 +237,45 @@ if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
 fi
 
 CHILD=""
+BRIDGE=""
 
-# Palworld does not read stdin, so a clean stop means asking it over RCON to
-# save and shut down. Falling back to SIGTERM keeps a stop working even when
-# RCON is off.
+rcon_send() {
+    command -v rcon >/dev/null 2>&1 || return 1
+    [ -n "${RCON_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ] || return 1
+    rcon -s -a "localhost:${RCON_PORT}" -p "${ADMIN_PASSWORD}" "$1" 2>/dev/null
+}
+
+# Panel console -> RCON. Palworld reads nothing from stdin, so without this the
+# console is write-only. stdin is duplicated to fd 4 first: a background loop
+# reading plain stdin is handed /dev/null by the shell and exits immediately,
+# which is exactly how the Zomboid console broke.
+exec 4<&0
+
+console_bridge() {
+    local line
+    while IFS= read -r line <&4; do
+        [ -n "${line}" ] || continue
+        rcon_send "${line}" || log "RCON is not configured - console command ignored: ${line}"
+    done
+}
+
 graceful_stop() {
     [ -n "${CHILD}" ] && kill -0 "${CHILD}" 2>/dev/null || return
 
-    if command -v rcon >/dev/null 2>&1 && [ -n "${RCON_PORT:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
-        log "Stop requested - saving over RCON before shutdown."
-        rcon -s -a "localhost:${RCON_PORT}" -p "${ADMIN_PASSWORD}" "Save" >/dev/null 2>&1 || true
-        sleep 2
-    fi
+    log "Stop requested - saving the world over RCON before shutting down."
+    rcon_send "Save" >/dev/null 2>&1 || log "WARN: could not save over RCON; falling back to a plain stop."
+    sleep 2
+    rcon_send "Shutdown 1 Server_is_shutting_down" >/dev/null 2>&1
 
-    kill -TERM "${CHILD}" 2>/dev/null || true
-
-    for _ in $(seq 1 "${PAL_STOP_TIMEOUT:-60}"); do
-        kill -0 "${CHILD}" 2>/dev/null || return
+    local waited=0
+    while [ "${waited}" -lt "${PAL_STOP_TIMEOUT:-25}" ]; do
+        kill -0 "${CHILD}" 2>/dev/null || { log "Server exited cleanly."; return; }
         sleep 1
+        waited=$((waited + 1))
     done
+
+    log "Still running after ${PAL_STOP_TIMEOUT:-25}s - sending SIGTERM."
+    kill -TERM "${CHILD}" 2>/dev/null || true
 }
 
 trap graceful_stop SIGTERM SIGINT
@@ -195,4 +285,14 @@ pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
 "${PTEROHOST_ARGS[@]}" &
 CHILD=$!
+
+console_bridge &
+BRIDGE=$!
+
 wait "${CHILD}"
+STATUS=$?
+
+kill "${BRIDGE}" 2>/dev/null || true
+exec 4<&-
+
+exit "${STATUS}"
