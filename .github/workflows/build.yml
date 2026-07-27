@@ -41,6 +41,48 @@ jobs:
       - name: shared/workshop.test.sh
         run: bash shared/workshop.test.sh
 
+  # steamcmd_base builds on its own rather than as one leg of the big matrix.
+  # The nine game images are FROM it, so they used to wait on `needs: build` -
+  # the whole 19-tag matrix, java_26_ea and a Docker Hub timeout included. One
+  # flaky leg then skipped every game image, which is exactly how a Palworld and
+  # Zomboid fix sat unbuilt while the tag it needed was already published.
+  base:
+    name: "steamcmd_base"
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./images/steamcmd-base/Dockerfile
+          # SteamCMD itself is a 32-bit x86 binary.
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ghcr.io/pterohost/pterodactyl-images:steamcmd_base
+            ghcr.io/pterohost/pterodactyl-images:steamcmd_base-${{ github.sha }}
+          cache-from: type=gha,scope=steamcmd_base
+          cache-to: type=gha,mode=max,scope=steamcmd_base
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.url=https://github.com/Pterohost/pterodactyl-images
+
   build:
     name: "${{ matrix.tag }}"
     needs: test
@@ -84,10 +126,6 @@ jobs:
           - tag: rust
             dir: rust
             # RustDedicated ships no arm64 depot.
-            platforms: linux/amd64
-          - tag: steamcmd_base
-            dir: steamcmd-base
-            # SteamCMD itself is a 32-bit x86 binary.
             platforms: linux/amd64
           - tag: gmod_classic
             dir: gmod-classic
@@ -137,10 +175,10 @@ jobs:
             org.opencontainers.image.url=https://github.com/Pterohost/pterodactyl-images
 
   # Images that are FROM ghcr.io/pterohost/pterodactyl-images:steamcmd_base, so
-  # they can only start once that tag has been pushed by the job above.
+  # they can only start once that tag has been pushed - and nothing else.
   derived:
     name: "${{ matrix.tag }}"
-    needs: build
+    needs: base
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
