@@ -67,23 +67,52 @@ startup command is `start-zomboid`. Per boot it:
   believes it may grow to 8 GB and gets OOM-killed by the cgroup, while a 16 GB
   plan silently caps itself at 8. Passing `-Xmx` on the command line does
   nothing, which is why the widespread advice to edit `start-server.sh` has no
-  effect. `ZOMBOID_HEAP_PCT` (default 80) and `ZOMBOID_MAX_HEAP_MB` tune it;
-  `-Xms` is pinned equal to `-Xmx` so the JVM stops resizing the heap mid-game.
-  `ZOMBOID_GC=g1` switches from the vendor ZGC to G1 with a 50 ms pause target.
+  effect. `-Xmx` is the plan (`SERVER_MEMORY`) and `-Xms` is 128 MB, the same
+  arithmetic the Minecraft eggs use: Wings gives the container the plan plus a
+  5% overhead, which is the room the JVM needs outside the heap. `-Xms` used to
+  equal `-Xmx`, so the JVM committed the whole plan in the first second and the
+  panel showed a server at 84-96% memory before anyone joined - customers read
+  that as "out of RAM" and a node carrying three 24 GB worlds really did run
+  out. `ZOMBOID_MIN_HEAP_MB` (default 128), `ZOMBOID_HEAP_PCT` (default 100) and
+  `ZOMBOID_MAX_HEAP_MB` tune it. `ZOMBOID_GC=g1` switches from the vendor ZGC to
+  G1 with a 50 ms pause target and a periodic collection, without which a G1
+  heap started small would ratchet up and never come back down;
 - writes `DefaultPort`, `UDPPort`, `RCONPort`, `RCONPassword`, `PublicName` and
   `MaxPlayers` into `<server>.ini` from the egg variables, leaving every
   gameplay key the owner tuned alone. RCON matters because Zomboid's A2S reply
   carries **no player names** - RCON `players` is the only way the panel can
   list who is online;
 - turns SIGTERM into a `quit` on the game's stdin so the world is saved, waiting
-  up to `ZOMBOID_STOP_TIMEOUT` (default 90s) before escalating.
+  up to `ZOMBOID_STOP_TIMEOUT` (default 90s) before escalating. The console
+  forwarder that carries `quit` reads from a saved copy of stdin (`exec 4<&0`):
+  a background job gets `/dev/null` for stdin unless it is redirected, so the
+  earlier `while read; done &` exited instantly and every panel console command
+  - including the stop - was swallowed, leaving Wings to SIGKILL the server with
+  the world unsaved.
 
 The `palworld` tag ships a `start-palworld` bootstrap. Use it with an egg whose
 startup command is `start-palworld`. Per boot it:
 
-- updates via anonymous SteamCMD and runs the egg's own
-  `PalworldServerConfigParser` when present, so servers migrating from the
-  third-party image keep their existing behaviour;
+- updates via anonymous SteamCMD;
+- **owns `PalWorldSettings.ini`.** Every setting lives in one Unreal tuple, and
+  `shared/unrealini.awk` walks it key by key rather than splitting on commas -
+  which is what the third-party `PalworldServerConfigParser` did, ending the
+  replaced value at the first comma after the key. Any name or description
+  containing a comma therefore grew one duplicated tail per boot until the
+  quotes stopped balancing; two live servers had been rewriting themselves for
+  weeks and one was cut off mid-value with no closing parenthesis. The parser is
+  no longer run (`PAL_LEGACY_PARSER=1` brings it back) and a damaged tuple is
+  repaired on the way past. Which variable writes which key is declared in
+  `shared/palworld-keys.tsv`;
+- **moves `WorldOption.sav` aside.** When a world is uploaded from the client,
+  Palworld takes its settings from `Pal/Saved/SaveGames/0/<id>/WorldOption.sav`
+  and ignores `PalWorldSettings.ini` entirely - including `AdminPassword`, which
+  then stays EMPTY. Seven servers on our fleet were in that state: the panel
+  showed one admin password while the server accepted a blank one from anyone
+  who could reach the RCON port, and no settings change ever took effect. The
+  file is renamed, never deleted; `PAL_KEEP_WORLD_OPTION=1` opts out;
+- bridges the panel console to RCON, because Palworld reads nothing from stdin.
+  The egg's stop command must therefore be `^C`, not a console line;
 - enables **RCON** and the **REST API** in `PalWorldSettings.ini` from
   `RCON_PORT` / `REST_PORT` / `ADMIN_PASSWORD`. Palworld answers no Valve A2S on
   any port - verified by sweeping the game port, +1, +2, +24714, `QUERY_PORT`,
