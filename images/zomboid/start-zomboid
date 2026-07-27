@@ -59,7 +59,14 @@ fi
 # ---------------------------------------------------------------------------
 JSON="/home/container/ProjectZomboid64.json"
 
-compute_heap_mb() {
+# max_heap_mb
+#   -Xmx, and nothing else, is what the customer bought. Wings gives the
+#   container the plan plus a 5% overhead (docker.overhead.default_multiplier),
+#   which is the room the JVM needs outside the heap - metaspace, code cache,
+#   thread stacks, GC structures and the game's native libraries. That is the
+#   same arithmetic the Minecraft eggs here have always used
+#   (-Xms128M -Xmx{{SERVER_MEMORY}}M), so Zomboid now matches it.
+max_heap_mb() {
     local limit="${SERVER_MEMORY:-0}"
 
     # Explicit override wins, for the rare server that needs hand-tuning.
@@ -75,44 +82,61 @@ compute_heap_mb() {
         return
     fi
 
-    # The JVM needs headroom beyond the heap for metaspace, code cache, GC
-    # structures, thread stacks and the game's native libraries. ZGC in
-    # particular reserves generously. 80% with a 1 GB floor keeps us inside the
-    # cgroup limit instead of being killed by it.
-    local pct="${ZOMBOID_HEAP_PCT:-80}"
+    # ZOMBOID_HEAP_PCT stays as the dial for a server that turns out to need
+    # more room outside the heap than the overhead provides.
+    local pct="${ZOMBOID_HEAP_PCT:-100}"
     local heap=$(( limit * pct / 100 ))
 
-    [ "${heap}" -lt 1024 ] && heap=1024
-    [ "${heap}" -gt "$(( limit - 256 ))" ] && heap=$(( limit - 256 ))
     [ "${heap}" -lt 512 ] && heap=512
 
     echo "${heap}"
 }
 
+# min_heap_mb
+#   The headline of this change. -Xms used to equal -Xmx, so the JVM committed
+#   the entire plan on the first second and the panel showed a server sitting at
+#   84-96% memory before a single player joined. Customers read that as "out of
+#   RAM", and a node carrying three 24 GB Zomboid servers really did run out.
+#   Starting small lets the heap grow with the world and lets ZGC hand the pages
+#   back when it shrinks.
+min_heap_mb() {
+    local min="${ZOMBOID_MIN_HEAP_MB:-128}"
+    local max="$1"
+
+    [ "${min}" -lt 64 ] 2>/dev/null && min=64
+    [ "${min}" -gt "${max}" ] 2>/dev/null && min="${max}"
+
+    echo "${min}"
+}
+
 if [ -f "${JSON}" ] && command -v jq >/dev/null 2>&1; then
-    HEAP_MB="$(compute_heap_mb)"
+    HEAP_MB="$(max_heap_mb)"
+    MIN_HEAP_MB="$(min_heap_mb "${HEAP_MB}")"
     GC="${ZOMBOID_GC:-zgc}"
 
     case "${GC}" in
         g1)
             # Community-favoured alternative: shorter, more frequent pauses.
-            gc_args='["-XX:+UseG1GC","-XX:MaxGCPauseMillis=50"]'
+            # G1 only gives memory back on a full GC, so with a small -Xms the
+            # heap would ratchet up and never come down. The periodic collection
+            # is what makes "grows with the world" true for G1 as well.
+            gc_args='["-XX:+UseG1GC","-XX:MaxGCPauseMillis=50","-XX:G1PeriodicGCInterval=300000","-XX:G1PeriodicGCSystemLoadThreshold=0"]'
             ;;
         *)
-            # Vendor default. Kept as the default here so switching image does
-            # not silently change GC behaviour on a working server.
+            # Vendor default, and the better fit here: ZGC uncommits unused heap
+            # on its own, so a quiet server returns memory to the node.
             gc_args='["-XX:+UseZGC"]'
             ;;
     esac
 
     if jq -e . "${JSON}" >/dev/null 2>&1; then
-        cp -a "${JSON}" "${JSON}.pterohost-orig" 2>/dev/null || true
+        [ -f "${JSON}.pterohost-orig" ] || cp -a "${JSON}" "${JSON}.pterohost-orig" 2>/dev/null || true
 
         tmp="$(mktemp)"
-        jq --argjson heap "${HEAP_MB}" --argjson gc "${gc_args}" '
+        jq --argjson heap "${HEAP_MB}" --argjson minheap "${MIN_HEAP_MB}" --argjson gc "${gc_args}" '
             .vmArgs = ([
                 "-Djava.awt.headless=true",
-                "-Xms\($heap)m",
+                "-Xms\($minheap)m",
                 "-Xmx\($heap)m",
                 "-Dzomboid.steam=1",
                 "-Dzomboid.znetlog=1",
@@ -120,8 +144,9 @@ if [ -f "${JSON}" ] && command -v jq >/dev/null 2>&1; then
                 "-Djava.security.egd=file:/dev/urandom",
                 "-XX:-OmitStackTraceInFastThrow"
             ] + $gc)
-        ' "${JSON}" > "${tmp}" 2>/dev/null && mv "${tmp}" "${JSON}" \
-            && log "JVM heap set to ${HEAP_MB}m (limit ${SERVER_MEMORY:-?}m, GC ${GC})." \
+        ' "${JSON}" > "${tmp}" 2>/dev/null \
+            && cat "${tmp}" > "${JSON}" && rm -f "${tmp}" \
+            && log "JVM heap: -Xms${MIN_HEAP_MB}m -Xmx${HEAP_MB}m (plan ${SERVER_MEMORY:-?}m, GC ${GC})." \
             || { rm -f "${tmp}"; log "WARN: could not rewrite ${JSON}; leaving vendor JVM args."; }
     else
         log "WARN: ${JSON} is not valid JSON; leaving it alone."
@@ -193,6 +218,14 @@ mkfifo "${FIFO}" 2>/dev/null || true
 # no writer happens to be attached.
 exec 3<>"${FIFO}"
 
+# Wings' end of the console, kept on its own descriptor. The forwarder below
+# runs as a background job, and the shell gives a background job /dev/null for
+# stdin unless it is redirected explicitly - so the previous "while read; done &"
+# saw EOF and exited instantly. Nothing typed in the panel console ever reached
+# the game, and the egg's "quit" stop command was swallowed with it: every stop
+# ran to the Wings timeout and ended in SIGKILL, with the world unsaved.
+exec 4<&0
+
 graceful_stop() {
     if [ -z "${CHILD}" ] || ! kill -0 "${CHILD}" 2>/dev/null; then
         return
@@ -248,10 +281,16 @@ pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 "${PTEROHOST_ARGS[@]}" <"${FIFO}" &
 CHILD=$!
 
-# Forward panel console input into the same FIFO.
-while IFS= read -r line; do
-    printf '%s\n' "${line}" >&3
-done &
+# Forward panel console input into the same FIFO, reading from the saved copy of
+# stdin rather than from stdin itself - see the comment on `exec 4<&0` above.
+forward_console() {
+    local line
+    while IFS= read -r line <&4; do
+        printf '%s\n' "${line}" >&3
+    done
+}
+
+forward_console &
 FORWARDER=$!
 
 wait "${CHILD}"
@@ -259,6 +298,7 @@ STATUS=$?
 
 kill "${FORWARDER}" 2>/dev/null || true
 exec 3>&-
+exec 4<&-
 rm -f "${FIFO}"
 
 exit "${STATUS}"
