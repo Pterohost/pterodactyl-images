@@ -74,9 +74,16 @@ startup command is `start-zomboid`. Per boot it:
   panel showed a server at 84-96% memory before anyone joined - customers read
   that as "out of RAM" and a node carrying three 24 GB worlds really did run
   out. `ZOMBOID_MIN_HEAP_MB` (default 128), `ZOMBOID_HEAP_PCT` (default 100) and
-  `ZOMBOID_MAX_HEAP_MB` tune it. `ZOMBOID_GC=g1` switches from the vendor ZGC to
-  G1 with a 50 ms pause target and a periodic collection, without which a G1
-  heap started small would ratchet up and never come back down;
+  `ZOMBOID_MAX_HEAP_MB` tune it. The collector is **G1 by default** - a 50 ms
+  pause target plus a periodic collection, without which a G1 heap started small
+  would ratchet up and never come back down. `ZOMBOID_GC=zgc` opts back in to
+  the vendor ZGC, which on Build 42 is a trap: ZGC backs its heap with a shared
+  mapping the cgroup charges as `shmem`, and it fills to the whole `-Xmx` within
+  seconds of boot regardless of `-Xms`. A 6 GB B42 server measured 5226 MB of
+  `shmem` against `-Xmx5222m` - 97% of the limit - and looped on
+  `Memory cgroup out of memory: Killed process (ProjectZomboid6)` with nothing
+  in the game log, only exit 137 and a wings "crashed state". The same server on
+  G1: 2.8 GB of 6 GB, `shmem` 4 MB, no OOM kill;
 - writes `DefaultPort`, `UDPPort`, `RCONPort`, `RCONPassword`, `PublicName` and
   `MaxPlayers` into `<server>.ini` from the egg variables, leaving every
   gameplay key the owner tuned alone. RCON matters because Zomboid's A2S reply
