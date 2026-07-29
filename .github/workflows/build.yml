@@ -8,6 +8,15 @@ on:
       - "images/**"
       - "shared/**"
       - ".github/workflows/build.yml"
+  # On a pull request only the contract tests run - see the guard on the
+  # publishing jobs below. Without this the tests first ran after the merge,
+  # which is the wrong end of the review: a PR could sit approved for days with
+  # nothing having checked it.
+  pull_request:
+    paths:
+      - "images/**"
+      - "shared/**"
+      - ".github/workflows/build.yml"
   schedule:
     # Weekly refresh to pick up base-image patches.
     - cron: "0 5 * * 1"
@@ -49,9 +58,15 @@ jobs:
   # the whole 19-tag matrix, java_26_ea and a Docker Hub timeout included. One
   # flaky leg then skipped every game image, which is exactly how a Palworld and
   # Zomboid fix sat unbuilt while the tag it needed was already published.
+  #
+  # Every publishing job below is skipped on a pull request. The tags they write
+  # are mutable and are what the nodes pull - :zomboid is the image a live
+  # server starts from - so building a PR would put unreviewed code on customer
+  # servers the moment the branch was pushed, merge or no merge.
   base:
     name: "steamcmd_base"
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -89,6 +104,7 @@ jobs:
   build:
     name: "${{ matrix.tag }}"
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -182,6 +198,7 @@ jobs:
   derived:
     name: "${{ matrix.tag }}"
     needs: base
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
