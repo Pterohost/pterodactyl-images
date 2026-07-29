@@ -188,6 +188,18 @@ built against winmm; its provenance and checksum are recorded in the Dockerfile.
 `WINEDLLOVERRIDES="winmm=n,b"` is what makes wine prefer it over its builtin -
 without that line mods fail with no error and no log line at all.
 
+**The egg's `done` marker has to change.** Most Palworld eggs use `Setting
+breakpad minidump AppID = 2394010`, which comes from the native build's
+`steamclient.so` and is **not printed under Proton** - Wings would leave such a
+server in "starting" forever. Both builds print `Running Palworld dedicated
+server on :<port>`, so that is the marker to use. It also happens to be more
+honest on the native build: the breakpad line appears during Steam API init, a
+second before the server is actually listening.
+
+```json
+{"done": "Running Palworld dedicated server on"}
+```
+
 `Pal/Saved/SaveGames` is identical between the two builds, so switching a server
 between `palworld` and `palworld_proton` is reversible and needs no conversion.
 The first boot after a switch is slow: SteamCMD downloads the other platform's
