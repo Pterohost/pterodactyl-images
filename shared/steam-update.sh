@@ -13,7 +13,9 @@
 #     and boots with the files already on disk instead of leaving the server down.
 
 STEAMCMD_SRC="${STEAMCMD_DIR:-/opt/steamcmd}"
-STEAMCMD_RUN="/home/container/.steamcmd"
+# Overridable so the contract tests can point it at a stub instead of the real
+# client; in a container it is always the copy inside the server volume.
+STEAMCMD_RUN="${STEAMCMD_RUN:-/home/container/.steamcmd}"
 
 pterohost_log() {
     printf '\033[0;36m[pterohost]\033[0m %s\n' "$*"
@@ -90,7 +92,18 @@ pterohost_steam_update() {
             +app_update "${appid}" "${branch_args[@]}" "${validate_arg[@]}" \
             +quit 2>&1 | tee "${log_file}" || true
 
-        if [ -e "${sentinel}" ]; then
+        # Ask SteamCMD whether it failed BEFORE looking at the sentinel. The
+        # sentinel is only evidence of a successful update on a first install;
+        # on every boot after that the file is already in the volume from last
+        # time, so a run that downloaded nothing still satisfies it. Checking it
+        # first is how six Project Zomboid servers pinned to a branch Valve had
+        # deleted printed "SteamCMD update OK." on every single boot while
+        # sitting on an old build - and how the branch handling below, which was
+        # written for exactly that case, turned out to be unreachable code.
+        local failed=0
+        grep -qiE "Failed to (install app|set beta)" "${log_file}" 2>/dev/null && failed=1
+
+        if [ "${failed}" -eq 0 ] && [ -e "${sentinel}" ]; then
             pterohost_log "SteamCMD update OK."
             pterohost_steam_sdk
             rm -f "${log_file}"
@@ -98,14 +111,18 @@ pterohost_steam_update() {
         fi
 
         # A branch name that does not exist is not a transient failure, and
-        # retrying it changes nothing. SteamCMD prints "Failed to set beta 'x'"
-        # and then downloads NOTHING, so the server starts with no binary and
-        # exits 127. That is how one paid Project Zomboid server sat dead for
-        # five days and another customer could not switch to build 42: the
-        # console said "Starting server..." and nothing explained why it was not.
-        if [ -n "${branch}" ] && grep -qi "Failed to set beta" "${log_file}" 2>/dev/null; then
+        # retrying it changes nothing. SteamCMD downloads NOTHING, so a fresh
+        # server starts with no binary and exits 127, and an existing one stays
+        # on whatever it already had. That is how one paid Project Zomboid
+        # server sat dead for five days and another could not get build 42.20:
+        # the console said "Starting server..." and nothing explained why it was
+        # not. Wording varies by client version - older builds say "Failed to
+        # set beta 'x'", current ones fail the install with "(Missing
+        # configuration)" - so both are matched.
+        if [ -n "${branch}" ] && [ "${failed}" -eq 1 ] \
+            && grep -qiE "Failed to set beta|Missing configuration" "${log_file}" 2>/dev/null; then
             pterohost_log "ERROR: Steam has no branch named '${branch}' for app ${appid} - nothing was downloaded."
-            pterohost_log "       Check the branch variable in the panel. For Project Zomboid build 42 it is 'unstable'; an empty value means the current stable release."
+            pterohost_log "       Check the branch variable in the panel. An empty value means the current stable release, which is what almost every server wants."
             if [ "${STEAM_BRANCH_FALLBACK:-1}" = "1" ]; then
                 pterohost_log "       Falling back to the default branch so the server still comes up."
                 branch=""
@@ -115,9 +132,13 @@ pterohost_steam_update() {
             break
         fi
 
-        pterohost_log "attempt ${attempt} did not produce ${sentinel} (transient?); retrying..."
+        if [ "${failed}" -eq 1 ]; then
+            pterohost_log "attempt ${attempt}: SteamCMD reported a failure (see above)."
+        else
+            pterohost_log "attempt ${attempt} did not produce ${sentinel} (transient?); retrying..."
+        fi
         attempt=$((attempt + 1))
-        sleep 5
+        [ "${attempt}" -le "${max_attempts}" ] && sleep "${STEAMCMD_RETRY_SLEEP:-5}"
     done
 
     rm -f "${log_file}"
