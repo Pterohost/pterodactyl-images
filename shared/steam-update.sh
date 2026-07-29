@@ -60,7 +60,7 @@ pterohost_steam_login_args() {
 pterohost_steam_update() {
     local appid="$1" branch="${2:-}" validate="${3:-1}" sentinel="$4"
     local attempt=1 max_attempts="${STEAMCMD_ATTEMPTS:-3}"
-    local branch_args=() validate_arg=() login_args=()
+    local branch_args=() validate_arg=() login_args=() platform_args=()
 
     pterohost_steam_seed
 
@@ -73,7 +73,17 @@ pterohost_steam_update() {
     esac
     [ "${validate}" = "1" ] && validate_arg=(validate)
 
-    pterohost_log "Updating Steam app ${appid}${branch:+ (branch ${branch})} as ${login_args[1]}..."
+    # STEAMCMD_PLATFORM lets an image pull a depot for an OS other than the one
+    # it runs on - the Windows depot under Proton or Wine. Unset means "whatever
+    # SteamCMD would pick", i.e. exactly what every Linux-native image already
+    # gets, so this is a no-op for them.
+    #
+    # The flag has to come before +login: SteamCMD applies it to the session,
+    # and after the login it is simply ignored - the depot still downloads as
+    # Linux and the Windows binary the caller is waiting for never appears.
+    [ -n "${STEAMCMD_PLATFORM:-}" ] && platform_args=(+@sSteamCmdForcePlatformType "${STEAMCMD_PLATFORM}")
+
+    pterohost_log "Updating Steam app ${appid}${branch:+ (branch ${branch})}${STEAMCMD_PLATFORM:+ (platform ${STEAMCMD_PLATFORM})} as ${login_args[1]}..."
 
     # Settle SteamCMD's own self-update first.
     "${STEAMCMD_RUN}/steamcmd.sh" +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 +quit >/dev/null 2>&1 || true
@@ -85,6 +95,7 @@ pterohost_steam_update() {
         pterohost_log "SteamCMD attempt ${attempt}/${max_attempts}..."
         timeout "${STEAMCMD_TIMEOUT:-1800}" "${STEAMCMD_RUN}/steamcmd.sh" \
             +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
+            "${platform_args[@]}" \
             +force_install_dir /home/container \
             "${login_args[@]}" \
             +app_update "${appid}" "${branch_args[@]}" "${validate_arg[@]}" \

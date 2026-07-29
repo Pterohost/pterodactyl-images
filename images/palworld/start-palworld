@@ -43,6 +43,13 @@
 #    and improve CPU utilisation on a game that is otherwise brutally
 #    single-thread bound. jemalloc is available as an opt-in preload because
 #    UE5 servers fragment the default allocator over long uptimes.
+#
+# 5. TWO RUNTIMES, ONE SCRIPT. The Proton image (palworld_proton) runs the
+#    Windows depot so that RE-UE4SS mods load, and differs from the native build
+#    in four places: the Steam platform, the binary, the config directory Unreal
+#    reads, and how the process is launched and stopped. Everything above -
+#    which is where all the bugs were - is identical, so PAL_RUNTIME branches
+#    here instead of a second copy of this file drifting out of sync.
 
 set -u
 cd /home/container || exit 1
@@ -59,12 +66,103 @@ cd /home/container || exit 1
 log() { pterohost_log "$@"; }
 
 APPID="${SRCDS_APPID:-2394010}"
-BINARY="/home/container/Pal/Binaries/Linux/PalServer-Linux-Shipping"
-PAL_CONFIG_DIR="/home/container/Pal/Saved/Config/LinuxServer"
+
+# Which build of the dedicated server this image runs. Set by the Dockerfile,
+# not by the egg: the two runtimes need different Steam depots, so a server able
+# to flip this per boot would spend every other start re-downloading the other
+# platform's files. Choosing the image in the panel is what chooses the runtime.
+#
+#   linux  - the native depot. Faster, and what a server should use unless it
+#            needs mods.
+#   proton - the Windows depot under GE-Proton. Slower (a translation layer on
+#            a game that is already single-thread bound) and worth it only
+#            because Palworld's mod ecosystem is RE-UE4SS, a Windows DLL that
+#            does not load into the native build at all.
+PAL_RUNTIME="${PAL_RUNTIME:-linux}"
+
+PAL_LINUX_BINARY="/home/container/Pal/Binaries/Linux/PalServer-Linux-Shipping"
+PAL_WIN_BINARY="/home/container/Pal/Binaries/Win64/PalServer-Win64-Shipping.exe"
+
+case "${PAL_RUNTIME}" in
+    proton)
+        BINARY="${PAL_WIN_BINARY}"
+        # Unreal writes its config under the platform it was built for, so the
+        # Windows build reads WindowsServer/ and never looks at LinuxServer/.
+        # Pointing the settings writer at the wrong one fails silently: the
+        # server boots on defaults and every panel setting appears to do nothing.
+        PAL_CONFIG_DIR="/home/container/Pal/Saved/Config/WindowsServer"
+        export STEAMCMD_PLATFORM=windows
+        ;;
+    *)
+        PAL_RUNTIME=linux
+        BINARY="${PAL_LINUX_BINARY}"
+        PAL_CONFIG_DIR="/home/container/Pal/Saved/Config/LinuxServer"
+        ;;
+esac
+
 PAL_INI="${PAL_CONFIG_DIR}/PalWorldSettings.ini"
 PAL_DEFAULTS="/home/container/DefaultPalWorldSettings.ini"
 PAL_KEYS="/etc/pterohost/palworld-keys.tsv"
 SAVE_DIR="/home/container/Pal/Saved/SaveGames/0"
+
+# ---------------------------------------------------------------------------
+# 0. Proton runtime. Every function here is a no-op on the native build.
+# ---------------------------------------------------------------------------
+
+# proton refuses to start without both of these and says so with a bare Python
+# traceback that names neither. Both point inside the server volume, so the
+# prefix - and anything a mod wrote into it - survives a container rebuild.
+pal_proton_env() {
+    export STEAM_COMPAT_DATA_PATH="${PAL_PROTON_PREFIX:-/home/container/.proton}"
+    export STEAM_COMPAT_CLIENT_INSTALL_PATH="/home/container/.steam"
+    # proton creates and owns pfx/ underneath. Naming it here is what lets the
+    # stop path reach wineserver for the prefix the server is actually in.
+    export WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx"
+    mkdir -p "${STEAM_COMPAT_DATA_PATH}" "${STEAM_COMPAT_CLIENT_INSTALL_PATH}"
+}
+
+# The mod loader ships in the image but has to live in Pal/Binaries/Win64, which
+# is inside the volume and is rewritten by every app_update. So it is synced in
+# on each boot, keyed on a version stamp, and re-synced whenever the files have
+# gone missing - which is exactly what a Steam validate does to them.
+#
+# Only the loader itself is overwritten. Mods/ is seeded once and then left
+# alone: that is where the owner's mods and their settings live, and clobbering
+# it on an image bump would delete work the panel never backed up.
+pal_sync_ue4ss() {
+    local src="${PAL_UE4SS_DIR:-/opt/pterohost/ue4ss}"
+    local dst="/home/container/Pal/Binaries/Win64"
+    local stamp="/home/container/.pterohost-ue4ss-version"
+    local want have
+
+    [ -d "${src}/payload" ] || return 0
+
+    if [ ! -d "${dst}" ]; then
+        log "WARN: ${dst} does not exist - skipping the RE-UE4SS install. The Windows depot has probably not downloaded yet."
+        return 0
+    fi
+
+    want="$(cat "${src}/VERSION" 2>/dev/null || echo unknown)"
+    have="$(cat "${stamp}" 2>/dev/null || echo none)"
+
+    if [ "${have}" = "${want}" ] && [ -f "${dst}/winmm.dll" ] && [ -f "${dst}/UE4SS.dll" ]; then
+        return 0
+    fi
+
+    if ! cp -f "${src}/payload/winmm.dll" "${src}/payload/UE4SS.dll" "${dst}/" 2>/dev/null; then
+        log "WARN: could not install RE-UE4SS into ${dst} - the server starts, but without mod support."
+        return 0
+    fi
+    [ -f "${dst}/UE4SS-settings.ini" ] || cp -f "${src}/payload/UE4SS-settings.ini" "${dst}/" 2>/dev/null || true
+    [ -d "${dst}/Mods" ] || cp -a "${src}/payload/Mods" "${dst}/" 2>/dev/null || true
+
+    printf '%s\n' "${want}" > "${stamp}" 2>/dev/null || true
+    log "RE-UE4SS ${want} installed into Pal/Binaries/Win64 - mods go in Mods/, enable them in Mods/mods.txt."
+}
+
+if [ "${PAL_RUNTIME}" = "proton" ]; then
+    pal_proton_env
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Update via anonymous SteamCMD.
@@ -75,6 +173,12 @@ else
     log "AUTO_UPDATE=0 - skipping SteamCMD, using existing server files."
     pterohost_steam_seed
     pterohost_steam_sdk
+fi
+
+# After the update, not before: app_update rewrites Pal/Binaries/Win64 and takes
+# the loader with it.
+if [ "${PAL_RUNTIME}" = "proton" ]; then
+    pal_sync_ue4ss
 fi
 
 # ---------------------------------------------------------------------------
@@ -190,12 +294,19 @@ apply_settings
 # ---------------------------------------------------------------------------
 # 5. Launch.
 # ---------------------------------------------------------------------------
-if [ "${USE_JEMALLOC:-0}" = "1" ] && [ -f "${JEMALLOC_LIB:-}" ]; then
-    export LD_PRELOAD="${JEMALLOC_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
-    log "jemalloc preloaded."
-fi
+# Both of these are about loading a Linux ELF, and the Proton runtime runs a PE.
+# LD_PRELOAD in particular is not merely useless there - it is inherited by every
+# helper Proton spawns and reliably breaks the prefix setup before wine starts.
+if [ "${PAL_RUNTIME}" = "linux" ]; then
+    if [ "${USE_JEMALLOC:-0}" = "1" ] && [ -f "${JEMALLOC_LIB:-}" ]; then
+        export LD_PRELOAD="${JEMALLOC_LIB}${LD_PRELOAD:+:${LD_PRELOAD}}"
+        log "jemalloc preloaded."
+    fi
 
-export LD_LIBRARY_PATH="/home/container/.steam/sdk64:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="/home/container/.steam/sdk64:${LD_LIBRARY_PATH:-}"
+elif [ "${USE_JEMALLOC:-0}" = "1" ]; then
+    log "USE_JEMALLOC=1 ignored - the Proton runtime runs a Windows binary, which does not use the system allocator."
+fi
 
 # The base command, used only when the panel did not supply one (an egg that
 # still reads "start-palworld" and nothing else).
@@ -210,6 +321,13 @@ pterohost_panel_argv "$@"
 
 if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
     PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
+elif [ "${PAL_RUNTIME}" = "proton" ]; then
+    # The egg's startup string names the native binary and is shared by both
+    # images, so the Proton image swaps element 0 rather than asking every owner
+    # to edit a line they did not write. Both spellings, because that line is
+    # owner-editable and some have made the path absolute.
+    pterohost_swap_binary ./Pal/Binaries/Linux/PalServer-Linux-Shipping "${BINARY}"
+    pterohost_swap_binary "${PAL_LINUX_BINARY}" "${BINARY}"
 fi
 
 # Appended only where the startup command does not already say otherwise.
@@ -276,14 +394,35 @@ graceful_stop() {
 
     log "Still running after ${PAL_STOP_TIMEOUT:-25}s - sending SIGTERM."
     kill -TERM "${CHILD}" 2>/dev/null || true
+
+    # Under Proton, CHILD is the launcher, not the game: the server is a wine
+    # process the launcher started and SIGTERM to the launcher leaves it running
+    # until Wings kills the container 30s later, world unsaved. wineserver -k is
+    # what actually reaches it.
+    if [ "${PAL_RUNTIME}" = "proton" ]; then
+        wineserver -k 2>/dev/null || "${PROTON_DIR:-/opt/pterohost-proton}/files/bin/wineserver" -k 2>/dev/null || true
+    fi
 }
 
 trap graceful_stop SIGTERM SIGINT
 
-log "Starting Palworld (game ${SERVER_PORT}, query ${QUERY_PORT:-unset}, rcon ${RCON_PORT:-off}, rest ${REST_PORT:-off})."
+# proton takes the command as its own arguments; the native build is the command.
+#
+# runinprefix, not run. `proton run` starts the game through steam.exe, which
+# detaches it from the console: stdout and stdin both disappear. That is the
+# "console output is broken under proton" every community Palworld-Proton egg
+# documents, and on this panel it is worse than an inconvenience - Wings decides
+# a server has finished starting by matching a line of its output, so a silent
+# server sits in "starting" forever. runinprefix runs the binary directly in the
+# same prefix and keeps both streams. PAL_PROTON_VERB=run is the way back if a
+# future build turns out to need the steam.exe wrapper for Steam registration.
+LAUNCHER=()
+[ "${PAL_RUNTIME}" = "proton" ] && LAUNCHER=(proton "${PAL_PROTON_VERB:-runinprefix}")
+
+log "Starting Palworld on the ${PAL_RUNTIME} runtime (game ${SERVER_PORT}, query ${QUERY_PORT:-unset}, rcon ${RCON_PORT:-off}, rest ${REST_PORT:-off})."
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-"${PTEROHOST_ARGS[@]}" &
+"${LAUNCHER[@]}" "${PTEROHOST_ARGS[@]}" &
 CHILD=$!
 
 console_bridge &

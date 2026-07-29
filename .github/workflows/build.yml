@@ -127,6 +127,15 @@ jobs:
             dir: rust
             # RustDedicated ships no arm64 depot.
             platforms: linux/amd64
+          - tag: palworld_proton
+            dir: palworld-proton
+            # Same game and the same start-palworld bootstrap as the `palworld`
+            # tag, but on the Windows depot under GE-Proton so RE-UE4SS mods
+            # load. Here rather than in `derived` because GE-Proton needs
+            # glibc >= 2.38 and the SteamCMD base is debian:12 (2.36), so this
+            # one is FROM ubuntu:24.04 and does not wait on steamcmd_base.
+            # The slowest leg in either matrix - the Proton tarball is 532 MB.
+            platforms: linux/amd64
           - tag: gmod_classic
             dir: gmod-classic
             # FROM the upstream Pterodactyl Source image, which is amd64 only.
