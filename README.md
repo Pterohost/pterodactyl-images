@@ -38,6 +38,7 @@ License: MIT
 | `rust` | RustDedicated (native Linux) | debian:12-slim | amd64 | Steam app `258550`, Oxide / Carbon / vanilla. See below. |
 | `zomboid` | Project Zomboid dedicated server | `steamcmd_base` | amd64 | Steam app `380870`. cgroup-aware JVM heap, RCON, save-on-stop. See below. |
 | `palworld` | Palworld dedicated server | `steamcmd_base` | amd64 | Steam app `2394010`. RCON + REST API, perf flags. See below. |
+| `palworld_proton` | Palworld, **Windows depot under GE-Proton** | `steamcmd_base` | amd64 | Steam app `2394010`. Same bootstrap as `palworld` plus RE-UE4SS. **Slower than the native tag - take it only for mods.** See below. |
 | `gmod` | Garry's Mod (srcds) | `steamcmd_base` | amd64 | Steam app `4020`. **x86-64 branch by default**, RCON, strict port bind. |
 | `gmod_classic` | Garry's Mod (srcds) | `ghcr.io/pterodactyl/games:source` | amd64 | Upstream image plus a `start-gmod` that runs the startup command verbatim. No image-side tuning - the compatibility fallback for `gmod`. |
 | `cs2` | Counter-Strike 2 | steamrt sniper | amd64 | Steam app `730`. On the official Steam Runtime 3 platform. |
@@ -133,6 +134,82 @@ startup command is `start-palworld`. Per boot it:
 Neither image invents a port: RCON and the REST API are only enabled when the
 egg actually allocated one, so nothing ever squats on a port the panel did not
 hand out.
+
+#### `palworld_proton` - the Windows build, for mods only
+
+Palworld's mod ecosystem is RE-UE4SS: a Windows DLL injected into
+`PalServer-Win64-Shipping.exe`. There is no Linux equivalent, so a server that
+wants mods has to run the Windows depot. That is the whole reason this tag
+exists.
+
+**It is not faster.** Proton is a translation layer on a game that is already
+brutally single-thread bound, and the native `palworld` tag wins on everything
+that is not "can I load a mod". Nobody should switch to this image for
+performance.
+
+It is the *same* `start-palworld` script - the settings writer, the
+`WorldOption.sav` fix, the RCON console bridge and the save-on-stop path are one
+implementation, not two. `PAL_RUNTIME=proton` (set by the Dockerfile, never by
+the egg) changes exactly four things:
+
+- **the depot.** `STEAMCMD_PLATFORM=windows` makes SteamCMD pull the Windows
+  build. The flag goes in before `+login`; after it, SteamCMD ignores it and
+  downloads Linux anyway;
+- **the config directory.** Unreal reads the one matching the build it is, so
+  the settings go to `Pal/Saved/Config/WindowsServer/`. Writing them to
+  `LinuxServer/` fails silently - the server boots on defaults and every panel
+  setting looks broken;
+- **the launch.** `proton run` with `STEAM_COMPAT_DATA_PATH=/home/container/.proton`
+  and `STEAM_COMPAT_CLIENT_INSTALL_PATH=/home/container/.steam`. Both inside the
+  volume, so the prefix survives a container rebuild. The egg's startup command
+  still names the *native* binary and is not edited: `pterohost_swap_binary`
+  replaces it, and logs that it did;
+- **the stop.** RCON `Save` + `Shutdown` as always, but the process being waited
+  on is the launcher, not the game, so `wineserver -k` backs it up. Without that
+  the world would be lost to Wings' SIGKILL 30 seconds later.
+
+`USE_JEMALLOC` and the Steam SDK `LD_LIBRARY_PATH` are skipped here: they are
+about loading a Linux ELF, and `LD_PRELOAD` in particular is inherited by every
+helper Proton spawns and breaks prefix creation.
+
+**RE-UE4SS** ships in the image and is copied into `Pal/Binaries/Win64` on each
+boot - it cannot be baked, because that directory is in the volume and every
+`app_update` rewrites it. The copy is keyed on a version stamp and repeats
+whenever the files have gone missing, which is what a Steam validate does to
+them. `Mods/` is seeded once and then left alone: the owner's mods live there.
+
+The loader is `winmm.dll`, not the `dwmapi.dll` from the RE-UE4SS release.
+dwmapi is the Desktop Window Manager, which a headless server never imports, so
+the shipped loader is simply never called - and renaming it does not help
+either, because the game *does* import winmm and dwmapi.dll exports none of
+those 181 symbols, so a renamed copy stops the server booting at all. The
+vendored `images/palworld-proton/winmm.dll` is RE-UE4SS's own `proxy` project
+built against winmm; its provenance and checksum are recorded in the Dockerfile.
+`WINEDLLOVERRIDES="winmm=n,b"` is what makes wine prefer it over its builtin -
+without that line mods fail with no error and no log line at all.
+
+**The egg's `done` marker has to change.** Most Palworld eggs use `Setting
+breakpad minidump AppID = 2394010`, which comes from the native build's
+`steamclient.so` and is **not printed under Proton** - Wings would leave such a
+server in "starting" forever. Both builds print `Running Palworld dedicated
+server on :<port>`, so that is the marker to use. It also happens to be more
+honest on the native build: the breakpad line appears during Steam API init, a
+second before the server is actually listening.
+
+```json
+{"done": "Running Palworld dedicated server on"}
+```
+
+`Pal/Saved/SaveGames` is identical between the two builds, so switching a server
+between `palworld` and `palworld_proton` is reversible and needs no conversion.
+The first boot after a switch is slow: SteamCMD downloads the other platform's
+depot in full.
+
+Upstream supports GE-Proton outside Steam only through umu, whose job is to
+recreate Steam's pressure-vessel container. That container exists to reconcile
+the host's *graphics* stack with the runtime's libraries, and a headless
+dedicated server touches none of it - which is why calling the launcher directly
+works here and would not for a desktop game.
 
 ### The rest of the game line
 
@@ -293,7 +370,14 @@ Pterohost s&box (native Linux)|ghcr.io/pterohost/pterodactyl-images:sbox
 Pterohost Rust (Oxide/Carbon/vanilla)|ghcr.io/pterohost/pterodactyl-images:rust
 Pterohost Project Zomboid|ghcr.io/pterohost/pterodactyl-images:zomboid
 Pterohost Palworld (RCON + REST)|ghcr.io/pterohost/pterodactyl-images:palworld
+Windows Proton Palworld|ghcr.io/pterohost/pterodactyl-images:palworld_proton
 ```
+
+`palworld` and `palworld_proton` go on the **same** egg, as two entries in that
+list - the startup command works unchanged for both, so switching runtimes is
+one dropdown. Set the egg's `WINDOWS_INSTALL` variable to `1` alongside the
+Proton image and the first install pulls the Windows depot directly; leave it at
+`0` and the server still repairs itself on the next boot, just slower.
 
 Bulk replacement of legacy tags in the `eggs.docker_images` JSON column can be done via a single
 SQL statement against the panel database:
