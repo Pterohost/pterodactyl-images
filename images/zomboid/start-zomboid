@@ -116,6 +116,40 @@ min_heap_mb() {
     echo "${min}"
 }
 
+# jvm_tmpdir
+#   Wings gives every container a 100 MB tmpfs on /tmp (docker.tmpfs_size), and
+#   that is where the JVM puts java.io.tmpdir. TMPDIR is not consulted on Linux
+#   - HotSpot hardcodes /tmp - so -Djava.io.tmpdir is the only way to move it.
+#
+#   Zomboid's startup backup builds its zip with commons-compress
+#   ParallelScatterZipCreator, which deflates entries into scratch files under
+#   java.io.tmpdir and only assembles the archive at the very end. Peak scratch
+#   usage is therefore the size of the entire compressed backup, not of the
+#   largest file in it. Service 7150 on node09 has a 2.1 GB save that
+#   compresses to 144 MB: past the 100 MB mark the writes fail with
+#   "No space left on device", ZipBackup swallows the exception, still logs
+#   "Backup made in 560 ms" and leaves a 0-byte zip behind. That is the whole
+#   failure mode - it is silent, and the server keeps booting normally. Six
+#   servers across five nodes had been producing empty backups this way, the
+#   last good one on each dating to whenever its world was still under 100 MB
+#   compressed.
+#
+#   So point it at the volume: 200 GB of real disk instead of 100 MB of the
+#   container's own RAM. Raising tmpfs_size would not be equivalent - tmpfs
+#   pages are charged to the container's memory cgroup, so a bigger /tmp comes
+#   straight out of the heap the customer paid for, and it would only move the
+#   cliff rather than remove it as the world grows.
+JVM_TMPDIR="/home/container/.tmp"
+
+if mkdir -p "${JVM_TMPDIR}" 2>/dev/null && [ -w "${JVM_TMPDIR}" ]; then
+    # commons-compress cleans up after itself, but a crash mid-backup leaves the
+    # scratch files behind, and they count against the customer's disk quota.
+    find "${JVM_TMPDIR}" -mindepth 1 -maxdepth 1 -mtime +1 -delete 2>/dev/null || true
+else
+    log "WARN: ${JVM_TMPDIR} is not writable - java.io.tmpdir stays on the 100 MB /tmp, backups over that size will fail."
+    JVM_TMPDIR=""
+fi
+
 if [ -f "${JSON}" ] && command -v jq >/dev/null 2>&1; then
     HEAP_MB="$(max_heap_mb)"
     MIN_HEAP_MB="$(min_heap_mb "${HEAP_MB}")"
@@ -156,11 +190,17 @@ if [ -f "${JSON}" ] && command -v jq >/dev/null 2>&1; then
             ;;
     esac
 
+    tmpdir_args='[]'
+    if [ -n "${JVM_TMPDIR}" ]; then
+        tmpdir_args="$(jq -nc --arg d "${JVM_TMPDIR}" '["-Djava.io.tmpdir=" + $d]')"
+    fi
+
     if jq -e . "${JSON}" >/dev/null 2>&1; then
         [ -f "${JSON}.pterohost-orig" ] || cp -a "${JSON}" "${JSON}.pterohost-orig" 2>/dev/null || true
 
         tmp="$(mktemp)"
-        jq --argjson heap "${HEAP_MB}" --argjson minheap "${MIN_HEAP_MB}" --argjson gc "${gc_args}" '
+        jq --argjson heap "${HEAP_MB}" --argjson minheap "${MIN_HEAP_MB}" --argjson gc "${gc_args}" \
+           --argjson tmpdir "${tmpdir_args}" '
             .vmArgs = ([
                 "-Djava.awt.headless=true",
                 "-Xms\($minheap)m",
@@ -170,10 +210,10 @@ if [ -f "${JSON}" ] && command -v jq >/dev/null 2>&1; then
                 "-Djava.library.path=linux64/:natives/",
                 "-Djava.security.egd=file:/dev/urandom",
                 "-XX:-OmitStackTraceInFastThrow"
-            ] + $gc)
+            ] + $gc + $tmpdir)
         ' "${JSON}" > "${tmp}" 2>/dev/null \
             && cat "${tmp}" > "${JSON}" && rm -f "${tmp}" \
-            && log "JVM heap: -Xms${MIN_HEAP_MB}m -Xmx${HEAP_MB}m (plan ${SERVER_MEMORY:-?}m, GC ${GC})." \
+            && log "JVM heap: -Xms${MIN_HEAP_MB}m -Xmx${HEAP_MB}m (plan ${SERVER_MEMORY:-?}m, GC ${GC}); scratch ${JVM_TMPDIR:-/tmp}." \
             || { rm -f "${tmp}"; log "WARN: could not rewrite ${JSON}; leaving vendor JVM args."; }
     else
         log "WARN: ${JSON} is not valid JSON; leaving it alone."
