@@ -134,6 +134,22 @@ RUN printf '#!/bin/sh\nexec python3 /opt/pterohost-proton/proton "$@"\n' > /usr/
 # RE-UE4SS, staged in the image and copied into Pal/Binaries/Win64 by
 # start-palworld (that directory lives in the volume and is rewritten by every
 # app_update, so it cannot be baked).
+#
+# v3.0.1 is not stale - it is the newest STABLE release upstream has, and has
+# been since 2024-02-14. Checked again 2026-08-05 after a customer's mod refused
+# to load against it and asked for "3.1".
+#
+# That 3.1 exists only inside `experimental-latest`, a single rolling
+# pre-release tag whose asset is named after the commit it was built from
+# (UE4SS_v3.0.1-1018-g662df915.zip today, something else tomorrow) and whose
+# contents change under the same tag. Pinning it by checksum means the build
+# breaks the moment upstream moves the tag; not pinning it means every rebuild
+# ships a different loader to every modded Palworld server on the fleet. Neither
+# is acceptable for servers customers pay for, and the mods that want 3.1 are a
+# small minority - so we stay on the stable release and tell those customers
+# plainly that the mod is ahead of the loader.
+#
+# Revisit when upstream tags a real 3.1: then this is a two-line bump.
 ARG UE4SS_VERSION=v3.0.1
 ARG UE4SS_SHA256=4b47d4bceddd2f561a4e395bfa00924ccfc945af576a2d0c613e6537846c57ec
 
