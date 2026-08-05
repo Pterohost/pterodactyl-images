@@ -181,12 +181,23 @@ ENV LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 LANGUAGE=en_US.UTF-8 \
     PROTON_DIR=/opt/pterohost-proton \
     PAL_UE4SS_DIR=/opt/pterohost/ue4ss \
     WINEDEBUG=-all \
-    WINEDLLOVERRIDES="winmm=n,b"
+    WINEDLLOVERRIDES="winmm=n,b;d3d9=n,b"
 
 # WINEDLLOVERRIDES is load-bearing, not tuning. Without winmm=n,b wine loads its
 # own builtin winmm, the proxy in the game directory is never mapped, and mods
 # fail in the one way nobody can debug from the panel: no error, no log line,
 # they simply do not run.
+#
+# d3d9 is the same mechanism for a different proxy. The server-side admin tools
+# the mod ecosystem actually uses - PalDefender and its forks - ship a d3d9
+# proxy rather than a UE4SS mod, and PalServer-Win64-Shipping.exe does import
+# d3d9.dll (verified against the shipped binary's import table), so the proxy is
+# mapped as soon as wine is told to prefer the native one. Without the override
+# the DLL sits in Pal/Binaries/Win64 and is silently ignored - which is what a
+# server owner sees as "the mod is installed and the commands still do nothing".
+#
+# n,b and not n on both: with no proxy present in the game directory wine falls
+# back to its builtin, so a server without mods is unaffected.
 
 WORKDIR /home/container
 COPY --chmod=755 shared/entrypoint.sh /entrypoint.sh

@@ -377,6 +377,32 @@ console_bridge() {
     done
 }
 
+# Wings decides a server has finished starting by matching a line of its output
+# against the egg's done marker. The native build prints that line itself; the
+# Proton build does not - the game's own stdout does not survive the launcher,
+# so a server that is up, listening and answering RCON sits in "Starting" in the
+# panel until Wings' own timeout, and the owner is told to wait for something
+# that already happened. Two customers opened tickets about exactly this.
+#
+# RCON is the readiness signal that does exist on both builds: it only answers
+# once the world is loaded. So on Proton we poll it and print the marker
+# ourselves, once, in the same wording the egg matches.
+PAL_DONE_MARKER="Running Palworld dedicated server on"
+
+ready_probe() {
+    local waited=0 limit="${PAL_READY_TIMEOUT:-1800}"
+    while [ "${waited}" -lt "${limit}" ]; do
+        kill -0 "${CHILD}" 2>/dev/null || return
+        if rcon_send "Info" >/dev/null 2>&1; then
+            printf '%s %s:%s\n' "${PAL_DONE_MARKER}" "${PUBLIC_IP:-0.0.0.0}" "${SERVER_PORT}"
+            return
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    log "WARN: no RCON answer after ${limit}s - the panel will keep showing Starting even if the game is up."
+}
+
 graceful_stop() {
     [ -n "${CHILD}" ] && kill -0 "${CHILD}" 2>/dev/null || return
 
@@ -428,10 +454,17 @@ CHILD=$!
 console_bridge &
 BRIDGE=$!
 
+READY=""
+if [ "${PAL_RUNTIME}" = "proton" ]; then
+    ready_probe &
+    READY=$!
+fi
+
 wait "${CHILD}"
 STATUS=$?
 
 kill "${BRIDGE}" 2>/dev/null || true
+[ -n "${READY}" ] && kill "${READY}" 2>/dev/null
 exec 4<&-
 
 exit "${STATUS}"
