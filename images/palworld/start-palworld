@@ -130,48 +130,30 @@ pal_proton_env() {
 # alone: that is where the owner's mods and their settings live, and clobbering
 # it on an image bump would delete work the panel never backed up.
 #
-# RE-UE4SS and PalDefender - the two loaders the Palworld ecosystem uses - both
-# inject at start and both hook the engine, and a server running the pair froze
-# at 440 MB with the CPU idle, before the world had loaded, and stayed there.
-# Neither side reported it: UE4SS stopped mid-typedump and PalDefender logged a
-# clean start. So the two cannot share a server, and something has to choose.
+# PAL_UE4SS=0 turns the loader off, and has to actively remove it rather than
+# just skip the copy: a server that was synced once keeps the winmm proxy in its
+# volume forever, and the proxy is what loads UE4SS. Mods/ is never touched, so
+# turning it back on restores the owner's setup untouched.
 #
-# PAL_UE4SS decides:
-#
-#   auto (default) - PalDefender wins if its files are in the volume, otherwise
-#                    the loader is installed as before. An owner who uploads
-#                    PalDefender has said what they want without needing a
-#                    setting, and the panel cannot deliver one to every server
-#                    anyway.
-#   1              - always install the loader, even next to PalDefender. For a
-#                    server whose mods genuinely need it and whose owner accepts
-#                    the risk.
-#   0              - never install it.
-#
-# Turning it off has to REMOVE the loader, not just skip the copy: a volume
-# synced once keeps the winmm proxy forever, and the proxy is what pulls UE4SS
-# in. Mods/ is never touched either way, so switching back restores the owner's
-# setup exactly as it was.
+# The reason the switch exists at all: RE-UE4SS and PalDefender - the two loaders
+# the Palworld ecosystem uses - both inject at start and both hook the engine,
+# and on a server running both the game froze at 440 MB with the CPU idle,
+# before the world was loaded. Neither log said anything: UE4SS stopped
+# mid-typedump and PalDefender reported a clean start. Owners need PalDefender
+# for admin commands far more often than they need UE4SS, whose one common
+# consumer - Creative Menu - now ships a version that does not want it.
 pal_sync_ue4ss() {
     local src="${PAL_UE4SS_DIR:-/opt/pterohost/ue4ss}"
     local dst="/home/container/Pal/Binaries/Win64"
     local stamp="/home/container/.pterohost-ue4ss-version"
-    local want have mode reason
+    local want have
 
-    mode="${PAL_UE4SS:-auto}"
-    reason=""
-
-    if [ "${mode}" = "auto" ] && [ -f "${dst}/PalDefender.dll" ] && [ -f "${dst}/d3d9.dll" ]; then
-        mode=0
-        reason=" PalDefender is installed and the two loaders deadlock this server together; set PAL_UE4SS=1 to keep both anyway."
-    fi
-
-    if [ "${mode}" = "0" ]; then
+    if [ "${PAL_UE4SS:-1}" = "0" ]; then
         if [ -f "${dst}/winmm.dll" ] || [ -f "${dst}/UE4SS.dll" ]; then
             rm -f "${dst}/winmm.dll" "${dst}/UE4SS.dll" "${stamp}" 2>/dev/null || true
-            log "RE-UE4SS loader removed.${reason} Mods/ is left as it is."
+            log "PAL_UE4SS=0 - RE-UE4SS loader removed. Mods/ is left as it is; set PAL_UE4SS=1 to put it back."
         else
-            log "Starting without the RE-UE4SS loader.${reason}"
+            log "PAL_UE4SS=0 - starting without the RE-UE4SS loader."
         fi
         return 0
     fi
@@ -181,6 +163,10 @@ pal_sync_ue4ss() {
     if [ ! -d "${dst}" ]; then
         log "WARN: ${dst} does not exist - skipping the RE-UE4SS install. The Windows depot has probably not downloaded yet."
         return 0
+    fi
+
+    if [ -f "${dst}/PalDefender.dll" ] && [ -f "${dst}/d3d9.dll" ]; then
+        log "WARN: PalDefender and RE-UE4SS are both installed. They have been seen to deadlock this server during startup - if it never finishes starting, set PAL_UE4SS=0 to keep PalDefender and drop the loader."
     fi
 
     want="$(cat "${src}/VERSION" 2>/dev/null || echo unknown)"
