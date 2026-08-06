@@ -536,6 +536,10 @@ Every image ships with:
 git clone https://github.com/Pterohost/pterodactyl-images
 cd pterodactyl-images
 
+# Versioned hooks. Git never enables these on clone, and the one hook here
+# strips assistant co-author trailers that some editors append on their own.
+git config core.hooksPath .githooks
+
 # Single-arch sanity build
 docker buildx build \
   --platform linux/amd64 \

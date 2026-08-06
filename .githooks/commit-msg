@@ -1,0 +1,36 @@
+#!/bin/bash
+# Strip assistant co-author trailers from commit messages.
+#
+# The instruction that adds `Co-Authored-By: Claude ...` lives outside this
+# repository, in the tooling configuration of whoever happens to be committing.
+# A note in CONTRIBUTING would therefore be advice that the tool never reads.
+# This hook is the same rule expressed where it actually runs, and it is
+# versioned, so a fresh clone gets it with `git config core.hooksPath .githooks`.
+#
+# The history was rewritten once to remove eight such trailers. This exists so
+# that never has to happen twice.
+
+set -u
+
+msg_file="${1:-}"
+[ -n "${msg_file}" ] && [ -f "${msg_file}" ] || exit 0
+
+# Match the trailer only in its trailer form: at the start of a line, allowing
+# the leading whitespace git itself tolerates. A body that *discusses* the
+# trailer - like this file's own commit message - must survive untouched.
+if ! grep -qiE '^[[:space:]]*Co-Authored-By:[[:space:]]*Claude' "${msg_file}"; then
+    exit 0
+fi
+
+tmp="${msg_file}.pterohost.$$"
+grep -viE '^[[:space:]]*Co-Authored-By:[[:space:]]*Claude' "${msg_file}" > "${tmp}" || true
+
+# Removing a trailer leaves the blank line that separated it from the body.
+# Collapse trailing blanks back to exactly one terminating newline, so the
+# rewritten message is byte-identical to one that never had the trailer.
+awk 'BEGIN { blanks = 0 }
+     /^[[:space:]]*$/ { blanks++; next }
+     { while (blanks-- > 0) print ""; blanks = 0; print }' "${tmp}" > "${msg_file}"
+
+rm -f "${tmp}"
+exit 0
