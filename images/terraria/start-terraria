@@ -19,7 +19,16 @@
 # ядра, генерация serverconfig.txt и то, что статической строкой не выразить.
 
 set -u
-cd /home/container || exit 1
+
+# Каталог сервера. При установке Wings монтирует его в /mnt/server и запускает
+# этот же скрипт с --install-only, поэтому путь не прибит гвоздями: одна
+# реализация установки на установку и на запуск.
+ROOT="${TERRARIA_ROOT:-/home/container}"
+INSTALL_ONLY=0
+[ "${1:-}" = "--install-only" ] && { INSTALL_ONLY=1; shift; }
+
+mkdir -p "$ROOT"
+cd "$ROOT" || exit 1
 
 . /usr/local/lib/pterohost/launch.sh
 
@@ -33,7 +42,7 @@ WORLD_DIFFICULTY="${WORLD_DIFFICULTY:-0}"
 MAX_PLAYERS="${MAX_PLAYERS:-8}"
 SERVER_MOTD="${SERVER_MOTD:-}"
 SERVER_PASSWORD="${SERVER_PASSWORD:-}"
-WORLD_DIR="/home/container/saves/Worlds"
+WORLD_DIR="${ROOT}/saves/Worlds"
 
 terraria_github_asset() {
     local repo="$1" pattern="$2" tag="${3:-latest}"
@@ -49,12 +58,12 @@ terraria_github_asset() {
 
 # Ванильный сервер: собственный ELF, рантайм ему не нужен.
 terraria_install_vanilla() {
-    [ -f /home/container/TerrariaServer.bin.x86_64 ] \
-        && [ -f "/home/container/.terraria-${TERRARIA_VERSION}" ] && return 0
+    [ -f ${ROOT}/TerrariaServer.bin.x86_64 ] \
+        && [ -f "${ROOT}/.terraria-${TERRARIA_VERSION}" ] && return 0
 
     local url="https://terraria.org/api/download/pc-dedicated-server/terraria-server-${TERRARIA_VERSION}.zip"
     pterohost_log "установка Terraria ${TERRARIA_VERSION}"
-    local tmp="/home/container/.terraria-tmp"
+    local tmp="${ROOT}/.terraria-tmp"
     rm -rf "$tmp" && mkdir -p "$tmp"
     if ! curl -fsSL "$url" -o "$tmp/server.zip"; then
         pterohost_log "не скачался $url - проверьте TERRARIA_VERSION"
@@ -71,16 +80,16 @@ terraria_install_vanilla() {
         return 1
     fi
 
-    cp -R "$linux"/* /home/container/
-    chmod +x /home/container/TerrariaServer.bin.x86_64 2>/dev/null
+    cp -R "$linux"/* "$ROOT"/
+    chmod +x "$ROOT"/TerrariaServer.bin.x86_64 2>/dev/null
     rm -rf "$tmp"
-    rm -f /home/container/.terraria-* 2>/dev/null
-    touch "/home/container/.terraria-${TERRARIA_VERSION}"
+    rm -f ${ROOT}/.terraria-* 2>/dev/null
+    touch "${ROOT}/.terraria-${TERRARIA_VERSION}"
 }
 
 terraria_install_tshock() {
-    [ -x /home/container/TShock.Server ] \
-        && [ -f "/home/container/.tshock-${TSHOCK_VERSION}" ] && return 0
+    [ -x ${ROOT}/TShock.Server ] \
+        && [ -f "${ROOT}/.tshock-${TSHOCK_VERSION}" ] && return 0
 
     local url
     url="$(terraria_github_asset Pryaxis/TShock 'linux-x64.*\.zip$' "$TSHOCK_VERSION")"
@@ -90,15 +99,21 @@ terraria_install_tshock() {
     fi
 
     pterohost_log "установка TShock: $url"
-    local tmp="/home/container/.tshock-tmp"
-    rm -rf "$tmp" && mkdir -p "$tmp"
+    local tmp="${ROOT}/.tshock-tmp"
+    rm -rf "$tmp" && mkdir -p "$tmp/out"
     curl -fsSL "$url" -o "$tmp/tshock.zip" || { rm -rf "$tmp"; return 1; }
-    unzip -oq "$tmp/tshock.zip" -d "$tmp" || true
+    unzip -oq "$tmp/tshock.zip" -d "$tmp/out" || true
 
-    # Релизы приходят то zip-архивом, то zip с tar внутри.
-    local tar
-    tar="$(find "$tmp" -name '*.tar' | head -n 1)"
-    [ -n "$tar" ] && tar -xf "$tar" -C "$tmp"
+    # Релизы приходят то zip-архивом, то zip с tar внутри. Архив распаковывается
+    # в отдельный каталог, иначе он сам уедет в каталог сервера и займёт там
+    # сотню мегабайт впустую.
+    local tarball
+    tarball="$(find "$tmp/out" -name '*.tar' | head -n 1)"
+    if [ -n "$tarball" ]; then
+        mkdir -p "$tmp/unpacked"
+        tar -xf "$tarball" -C "$tmp/unpacked"
+        rm -f "$tarball"
+    fi
 
     local server
     server="$(find "$tmp" -name 'TShock.Server' -type f | head -n 1)"
@@ -108,16 +123,16 @@ terraria_install_tshock() {
         return 1
     fi
 
-    cp -R "$(dirname "$server")"/* /home/container/
-    chmod +x /home/container/TShock.Server
+    cp -R "$(dirname "$server")"/* "$ROOT"/
+    chmod +x "$ROOT"/TShock.Server
     rm -rf "$tmp"
-    rm -f /home/container/.tshock-* 2>/dev/null
-    touch "/home/container/.tshock-${TSHOCK_VERSION}"
+    rm -f ${ROOT}/.tshock-* 2>/dev/null
+    touch "${ROOT}/.tshock-${TSHOCK_VERSION}"
 }
 
 terraria_install_tmodloader() {
-    [ -f /home/container/tModLoader.dll ] \
-        && [ -f "/home/container/.tmodloader-${TMODLOADER_VERSION}" ] && return 0
+    [ -f ${ROOT}/tModLoader.dll ] \
+        && [ -f "${ROOT}/.tmodloader-${TMODLOADER_VERSION}" ] && return 0
 
     local url
     url="$(terraria_github_asset tModLoader/tModLoader 'tModLoader\.zip$' "$TMODLOADER_VERSION")"
@@ -127,21 +142,21 @@ terraria_install_tmodloader() {
     fi
 
     pterohost_log "установка tModLoader: $url"
-    local tmp="/home/container/.tmod-tmp"
+    local tmp="${ROOT}/.tmod-tmp"
     rm -rf "$tmp" && mkdir -p "$tmp"
     curl -fsSL "$url" -o "$tmp/tml.zip" || { rm -rf "$tmp"; return 1; }
-    unzip -oq "$tmp/tml.zip" -d /home/container/ || true
+    unzip -oq "$tmp/tml.zip" -d "$ROOT"/ || true
     rm -rf "$tmp"
-    chmod +x /home/container/*.sh /home/container/LaunchUtils/*.sh 2>/dev/null
-    rm -f /home/container/.tmodloader-* 2>/dev/null
-    touch "/home/container/.tmodloader-${TMODLOADER_VERSION}"
+    chmod +x "$ROOT"/*.sh "$ROOT"/LaunchUtils/*.sh 2>/dev/null
+    rm -f ${ROOT}/.tmodloader-* 2>/dev/null
+    touch "${ROOT}/.tmodloader-${TMODLOADER_VERSION}"
 }
 
 # Один конфиг на все ядра: TShock и tModLoader читают тот же serverconfig.txt.
 # Файл создаётся один раз - дальше его правит владелец сервера, и перезаписывать
 # его на каждом старте значит терять эти правки.
 terraria_write_config() {
-    local file="/home/container/serverconfig.txt"
+    local file="${ROOT}/serverconfig.txt"
     mkdir -p "$WORLD_DIR"
     [ -f "$file" ] && return 0
 
@@ -168,12 +183,17 @@ case "$TERRARIA_CORE" in
 esac
 terraria_write_config
 
+if [ "$INSTALL_ONLY" = "1" ]; then
+    pterohost_log "ядро ${TERRARIA_CORE} установлено в ${ROOT}"
+    exit 0
+fi
+
 pterohost_panel_argv "$@"
 if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
     case "$TERRARIA_CORE" in
         tshock)
             PTEROHOST_ARGS=(./TShock.Server -ip 0.0.0.0 -port "${SERVER_PORT:-7777}" \
-                -config /home/container/serverconfig.txt)
+                -config ${ROOT}/serverconfig.txt)
             ;;
         tmodloader)
             # Минуя start-tModLoaderServer.sh: его ScriptCaller при каждом старте
@@ -181,10 +201,10 @@ if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
             # хотя нужная восьмёрка стоит в образе. Запуск сборки напрямую
             # экономит около сотни мегабайт трафика и минуту первого старта.
             PTEROHOST_ARGS=(dotnet tModLoader.dll -server \
-                -config /home/container/serverconfig.txt)
+                -config ${ROOT}/serverconfig.txt)
             ;;
         *)
-            PTEROHOST_ARGS=(./TerrariaServer.bin.x86_64 -config /home/container/serverconfig.txt)
+            PTEROHOST_ARGS=(./TerrariaServer.bin.x86_64 -config ${ROOT}/serverconfig.txt)
             ;;
     esac
 fi

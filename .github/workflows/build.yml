@@ -233,6 +233,8 @@ jobs:
             dir: arma3
           - tag: cs16
             dir: cs16
+          - tag: source
+            dir: source
           - tag: terraria
             dir: terraria
             # FROM yolks:dotnet_9, а не steamcmd_base: сервер Terraria и его

@@ -1,0 +1,81 @@
+#!/bin/bash
+# Source dedicated server: одна оболочка на всё семейство srcds.
+#
+# Игра задаётся парой SRCDS_APPID (депо выделенного сервера) и SRCDS_GAME
+# (каталог мода: tf, cstrike, dod, hl2mp, left4dead2, insurgency, bms). Всё
+# остальное - общие для движка флаги.
+#
+# Что здесь есть, чего нет у апстримного «Custom Source Engine Game»:
+#   - слоты. -maxplayers отсутствует и в строке запуска, и среди переменных
+#     апстрима, поэтому сервер поднимается с дефолтом движка и клиент не может
+#     его поднять. Для TF2 это 24 слота и невозможность запустить Mann vs
+#     Machine, которому нужно ровно 32.
+#   - тикрейт для игр, где он поддерживается движком.
+#   - GSLT и RCON-пароль подставляются здесь, а не в видимой строке запуска,
+#     поэтому не утекают в консоль и на скриншоты (см. pterohost_log_cmd).
+#
+# Команда запуска живёт в egg (контракт shared/launch.sh), здесь - установка,
+# вычисляемые флаги и то, чего статическая строка выразить не может.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/steam-update.sh
+. /usr/local/lib/pterohost/launch.sh
+
+APPID="${SRCDS_APPID:-232250}"
+GAME="${SRCDS_GAME:-tf}"
+MAP="${SRCDS_MAP:-}"
+MAX_PLAYERS="${MAX_PLAYERS:-}"
+TICKRATE="${TICKRATE:-}"
+
+pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "/home/container/srcds_run" || true
+
+# Некоторые депо кладут игру в подкаталог, а не в корень тома. Тогда srcds_run
+# лежит глубже, и запускать надо оттуда - иначе -game не найдёт мод.
+if [ ! -f /home/container/srcds_run ]; then
+    nested="$(find /home/container -maxdepth 3 -name srcds_run -type f | head -n 1)"
+    if [ -n "${nested}" ]; then
+        cd "$(dirname "${nested}")" || exit 1
+        pterohost_log "srcds_run найден в $(pwd)"
+    fi
+fi
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=(./srcds_run -game "${GAME}" -console -port "${SERVER_PORT:-27015}" \
+        +ip 0.0.0.0 -norestart)
+fi
+
+# Слоты: главное, ради чего этот образ существует.
+pterohost_append_if_absent -maxplayers -maxplayers "${MAX_PLAYERS}"
+pterohost_append_if_absent +map +map "${MAP}"
+
+# Тикрейт понимают не все игры семейства: у L4D2 и Insurgency он фиксирован
+# движком, и лишний флаг там только засоряет строку запуска.
+case "${GAME}" in
+    tf|cstrike|dod|hl2mp)
+        pterohost_append_if_absent -tickrate -tickrate "${TICKRATE}"
+        ;;
+esac
+
+# SourceTV: трансляция матча зрителям. Порт приходит отдельной аллокацией -
+# переменная называется TV_PORT намеренно, панель по суффиксу _PORT выдаёт под
+# неё настоящий порт. Пусто - трансляция не поднимается.
+pterohost_append_if_absent +tv_port +tv_port "${TV_PORT:-}"
+
+# GSLT нужен, чтобы сервер попал в браузер игры. Без токена сервер работает,
+# но остаётся невидимым в списке - об этом честно написано в описании egg.
+pterohost_append_if_absent +sv_setsteamaccount +sv_setsteamaccount "${STEAM_ACC:-}"
+pterohost_append_if_absent +rcon_password +rcon_password "${RCON_PASSWORD:-}"
+
+# -strictportbind по умолчанию выключен намеренно: он роняет srcds не только
+# из-за занятого игрового порта, но и из-за любого занятого служебного UDP,
+# а на ноде с десятками Source-серверов это вопрос времени.
+if [ "${SRCDS_STRICT_BIND:-0}" = "1" ]; then
+    pterohost_append_if_absent -strictportbind -strictportbind
+fi
+
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"
