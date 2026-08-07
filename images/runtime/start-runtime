@@ -1,0 +1,171 @@
+#!/bin/bash
+# Единый bootstrap для ботов и скриптов.
+#
+# Один egg на все рантаймы: сам рантайм выбирается docker-образом, а этот скрипт
+# делает одинаковую для всех работу - подтягивает репозиторий, ставит зависимости
+# по манифесту проекта и запускает точку входа. Клиент может перекрыть запуск
+# целиком через START_COMMAND, не трогая egg.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/launch.sh
+
+RUNTIME_KIND="${PTEROHOST_RUNTIME_KIND:-node}"
+MAIN_FILE="${MAIN_FILE:-}"
+START_COMMAND="${START_COMMAND:-}"
+EXTRA_ARGS="${EXTRA_ARGS:-}"
+AUTO_UPDATE="${AUTO_UPDATE:-0}"
+AUTO_INSTALL="${AUTO_INSTALL:-1}"
+INSTALL_PACKAGES="${INSTALL_PACKAGES:-}"
+GIT_ADDRESS="${GIT_ADDRESS:-}"
+BRANCH="${BRANCH:-}"
+GIT_USERNAME="${GIT_USERNAME:-}"
+GIT_TOKEN="${GIT_TOKEN:-}"
+
+pterohost_log "рантайм: ${PTEROHOST_RUNTIME:-$RUNTIME_KIND}"
+
+runtime_git_url() {
+    local url="$1"
+    [ -z "$url" ] && return 1
+    [[ "$url" != *.git ]] && url="${url}.git"
+    if [ -n "$GIT_USERNAME" ] && [ -n "$GIT_TOKEN" ]; then
+        url="https://${GIT_USERNAME}:${GIT_TOKEN}@$(echo "$url" | cut -d/ -f3-)"
+    fi
+    printf '%s' "$url"
+}
+
+runtime_sync_repo() {
+    [ -z "$GIT_ADDRESS" ] && return 0
+    local url
+    url="$(runtime_git_url "$GIT_ADDRESS")" || return 0
+
+    if [ -d .git ]; then
+        [ "$AUTO_UPDATE" = "1" ] || return 0
+        pterohost_log "обновление репозитория"
+        git -C /home/container pull --ff-only || pterohost_log "git pull не удался, работаем на том, что есть"
+        return 0
+    fi
+
+    if [ -n "$(ls -A /home/container 2>/dev/null)" ]; then
+        pterohost_log "каталог не пуст и это не репозиторий - клонирование пропущено"
+        return 0
+    fi
+
+    pterohost_log "клонирование репозитория"
+    if [ -n "$BRANCH" ]; then
+        git clone --single-branch --branch "$BRANCH" "$url" /home/container
+    else
+        git clone "$url" /home/container
+    fi
+}
+
+runtime_install() {
+    [ "$AUTO_INSTALL" = "1" ] || return 0
+
+    case "$RUNTIME_KIND" in
+        node)
+            [ -n "$INSTALL_PACKAGES" ] && npm install --no-fund --no-audit $INSTALL_PACKAGES
+            if [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then pnpm install
+            elif [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then yarn install
+            elif [ -f package.json ]; then npm install --no-fund --no-audit
+            fi
+            ;;
+        bun)
+            [ -n "$INSTALL_PACKAGES" ] && bun add $INSTALL_PACKAGES
+            [ -f package.json ] && bun install
+            ;;
+        python)
+            [ -n "$INSTALL_PACKAGES" ] && pip install --no-cache-dir --user $INSTALL_PACKAGES
+            [ -f requirements.txt ] && pip install --no-cache-dir --user -r requirements.txt
+            [ -f pyproject.toml ] && [ ! -f requirements.txt ] && pip install --no-cache-dir --user .
+            ;;
+        go)
+            [ -f go.mod ] && go mod download
+            ;;
+        rust)
+            [ -f Cargo.toml ] && cargo build --release
+            ;;
+        dotnet)
+            [ -n "$(ls -A ./*.csproj ./*.sln 2>/dev/null)" ] && dotnet restore
+            ;;
+        elixir)
+            [ -f mix.exs ] && mix deps.get --force
+            ;;
+        dart)
+            [ -f pubspec.yaml ] && dart pub get
+            ;;
+        java)
+            :
+            ;;
+    esac
+
+    return 0
+}
+
+runtime_default_command() {
+    local entry="$MAIN_FILE"
+
+    case "$RUNTIME_KIND" in
+        node)
+            [ -z "$entry" ] && entry="index.js"
+            if [[ "$entry" == *.ts ]] && command -v tsx >/dev/null 2>&1; then
+                printf 'tsx %s' "$entry"
+            else
+                printf 'node %s' "$entry"
+            fi
+            ;;
+        bun)
+            [ -z "$entry" ] && entry="index.ts"
+            printf 'bun run %s' "$entry"
+            ;;
+        python)
+            [ -z "$entry" ] && entry="bot.py"
+            printf 'python3 -u %s' "$entry"
+            ;;
+        java)
+            [ -z "$entry" ] && entry="bot.jar"
+            printf 'java -jar %s' "$entry"
+            ;;
+        go)
+            [ -z "$entry" ] && entry="."
+            printf 'go run %s' "$entry"
+            ;;
+        rust)
+            printf 'cargo run --release'
+            ;;
+        dotnet)
+            [ -z "$entry" ] && entry="app.dll"
+            printf 'dotnet %s' "$entry"
+            ;;
+        elixir)
+            printf 'mix run --no-halt'
+            ;;
+        dart)
+            [ -z "$entry" ] && entry="bin/main.dart"
+            printf 'dart run %s' "$entry"
+            ;;
+        *)
+            printf ''
+            ;;
+    esac
+}
+
+runtime_sync_repo
+runtime_install
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    command_line="$START_COMMAND"
+    [ -z "$command_line" ] && command_line="$(runtime_default_command)"
+    if [ -z "$command_line" ]; then
+        pterohost_log "не задан ни START_COMMAND, ни точка входа - запускать нечего"
+        exit 1
+    fi
+    [ -n "$EXTRA_ARGS" ] && command_line="$command_line $EXTRA_ARGS"
+    pterohost_log "запуск: $command_line"
+    exec /bin/bash -c "exec $command_line"
+fi
+
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"
