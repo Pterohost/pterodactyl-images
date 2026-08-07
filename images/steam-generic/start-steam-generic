@@ -1,0 +1,85 @@
+#!/bin/bash
+# Общий bootstrap под игры, которым достаточно SteamCMD и запуска бинаря.
+#
+# Что задаётся переменными egg:
+#   SRCDS_APPID      депо выделенного сервера;
+#   GAME_BINARY      путь к бинарю относительно каталога сервера;
+#   PORT_STYLE       как игра принимает порт: dash (-port 1234), unreal
+#                    (Port=1234), plus (+port 1234) или none (порт в конфиге);
+#   PORT_FLAG        имя флага порта, если оно отличается от стандартного;
+#   QUERY_PORT_FLAG  то же для порта опроса, если он у игры есть;
+#   STOP_SIGNAL      какой сигнал слать при остановке: TERM (по умолчанию) или
+#                    INT для игр, которые сохраняют мир только по нему;
+#   ADDITIONAL_ARGS  всё остальное, что владелец сервера хочет дописать.
+#
+# Чего этот образ намеренно НЕ делает: не правит конфигурации сложнее пары
+# ключей, не поднимает мосты RCON, не ставит моды. Игре, которой это нужно,
+# заводится свой образ - так сделаны Rust, Palworld, Terraria, Squad и Source.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/steam-update.sh
+. /usr/local/lib/pterohost/launch.sh
+
+APPID="${SRCDS_APPID:-}"
+BINARY="${GAME_BINARY:-}"
+PORT_STYLE="${PORT_STYLE:-dash}"
+PORT_FLAG="${PORT_FLAG:--port}"
+QUERY_PORT_FLAG="${QUERY_PORT_FLAG:-}"
+STOP_SIGNAL="${STOP_SIGNAL:-TERM}"
+
+if [ -z "$APPID" ] || [ -z "$BINARY" ]; then
+    pterohost_log "не заданы SRCDS_APPID и GAME_BINARY - egg настроен неверно"
+    exit 1
+fi
+
+pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "/home/container/${BINARY}" || true
+
+if [ ! -f "/home/container/${BINARY}" ]; then
+    pterohost_log "после установки нет файла ${BINARY} - проверьте путь в переменной GAME_BINARY"
+    exit 1
+fi
+chmod +x "/home/container/${BINARY}" 2>/dev/null
+
+# Форма записи порта у игр разная, и угадывать её нельзя: Unreal ждёт
+# Port=1234 одним аргументом, srcds-подобные - "-port 1234" двумя, часть
+# Unity-серверов - "+port 1234".
+port_args() {
+    local flag="$1" value="$2"
+    [ -z "$value" ] && return 0
+
+    case "$PORT_STYLE" in
+        unreal) printf '%s=%s\n' "${flag#-}" "$value" ;;
+        plus)   printf '+%s\n%s\n' "${flag#[-+]}" "$value" ;;
+        none)   ;;
+        *)      printf '%s\n%s\n' "$flag" "$value" ;;
+    esac
+}
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("/home/container/${BINARY}")
+    while IFS= read -r arg; do
+        [ -n "$arg" ] && PTEROHOST_ARGS+=("$arg")
+    done < <(port_args "$PORT_FLAG" "${SERVER_PORT:-}")
+    if [ -n "$QUERY_PORT_FLAG" ]; then
+        while IFS= read -r arg; do
+            [ -n "$arg" ] && PTEROHOST_ARGS+=("$arg")
+        done < <(port_args "$QUERY_PORT_FLAG" "${QUERY_PORT:-}")
+    fi
+fi
+
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+
+# Остановка: часть игр дописывает мир только по SIGINT и игнорирует SIGTERM от
+# Wings. Сигнал выбирается переменной, потому что универсального нет.
+if [ "$STOP_SIGNAL" = "TERM" ]; then
+    exec "${PTEROHOST_ARGS[@]}"
+fi
+
+"${PTEROHOST_ARGS[@]}" &
+CHILD=$!
+trap 'kill -'"${STOP_SIGNAL}"' "${CHILD}" 2>/dev/null' TERM INT
+wait "${CHILD}"
