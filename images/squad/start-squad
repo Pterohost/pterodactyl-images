@@ -1,0 +1,79 @@
+#!/bin/bash
+# Squad: выделенный сервер.
+#
+# Порты. Squad слушает три: игровой, отдельный порт опроса (по нему панель и
+# игровой браузер видят число игроков) и RCON. Апстримный egg получал только
+# игровой, потому что в панели был отнесён к семейству source, где
+# дополнительные порты не выдаются. Здесь все три приходят переменными, а
+# выдаёт их config/port_plan.php семейством squad.
+#
+# Обновление. Образ докачивает игру при каждом старте, поэтому новая версия
+# ставится обычным рестартом. Переустановка из панели стирает каталог сервера
+# вместе с SquadGame/ServerConfig - советовать её как способ обновиться нельзя.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/steam-update.sh
+. /usr/local/lib/pterohost/launch.sh
+
+APPID="${SRCDS_APPID:-403240}"
+CONFIG_DIR="/home/container/SquadGame/ServerConfig"
+BINARY="/home/container/SquadGame/Binaries/Linux/SquadGameServer"
+
+pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "${BINARY}" || true
+
+# Правка одной строки «Ключ=значение» в конфиге Squad. Файл принадлежит
+# владельцу сервера: трогаем только те ключи, что пришли переменными.
+squad_set() {
+    local file="$1" key="$2" value="$3"
+    [ -z "$value" ] && return 0
+    [ -f "$file" ] || return 0
+
+    if grep -qE "^[[:space:]]*${key}=" "$file"; then
+        sed -i -E "s|^[[:space:]]*${key}=.*|${key}=${value}|" "$file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+squad_config() {
+    mkdir -p "$CONFIG_DIR"
+
+    # Установщик кладёт примеры рядом с конфигами; если своего файла ещё нет,
+    # заводим его из примера, чтобы не потерять ключи текущей версии.
+    for name in Server Rcon Admins; do
+        if [ ! -f "${CONFIG_DIR}/${name}.cfg" ] && [ -f "${CONFIG_DIR}/${name}.cfg.example" ]; then
+            cp "${CONFIG_DIR}/${name}.cfg.example" "${CONFIG_DIR}/${name}.cfg"
+        fi
+    done
+    [ -f "${CONFIG_DIR}/Server.cfg" ] || : > "${CONFIG_DIR}/Server.cfg"
+    [ -f "${CONFIG_DIR}/Rcon.cfg" ] || : > "${CONFIG_DIR}/Rcon.cfg"
+
+    squad_set "${CONFIG_DIR}/Server.cfg" ServerName "${SERVER_NAME:-}"
+    squad_set "${CONFIG_DIR}/Server.cfg" MaxPlayers "${MAX_PLAYERS:-}"
+    squad_set "${CONFIG_DIR}/Server.cfg" ServerPassword "${SERVER_PASSWORD:-}"
+    squad_set "${CONFIG_DIR}/Server.cfg" ServerMessageInterval "${MESSAGE_INTERVAL:-}"
+
+    squad_set "${CONFIG_DIR}/Rcon.cfg" Password "${RCON_PASSWORD:-}"
+    squad_set "${CONFIG_DIR}/Rcon.cfg" Port "${RCON_PORT:-}"
+}
+
+squad_config
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("$BINARY" SquadGame
+        "Port=${SERVER_PORT:-7787}"
+        "QueryPort=${QUERY_PORT:-27165}"
+        "RCONPORT=${RCON_PORT:-21114}"
+        -log)
+fi
+
+# Потолок игроков Squad читает не из конфига, а из флага запуска: без него
+# сервер поднимается с дефолтом движка, а MaxPlayers в Server.cfg игнорируется.
+pterohost_append_if_absent FIXEDMAXPLAYERS "FIXEDMAXPLAYERS=${MAX_PLAYERS:-80}"
+
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"
