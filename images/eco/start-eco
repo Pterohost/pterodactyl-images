@@ -1,0 +1,102 @@
+#!/bin/bash
+# Eco: выделенный сервер.
+#
+# Порт и веб-порт задаются только файлом Configs/Network.eco - командную строку
+# сервер не слушает. Файл принадлежит владельцу сервера, поэтому образ правит в
+# нём ровно те ключи, что пришли переменными, и не трогает остальные.
+#
+# Остановка: по вики разработчиков мир сохраняется при SIGTERM, а SIGINT
+# завершает процесс без сохранения. Wings шлёт именно TERM, поэтому специальной
+# обработки не нужно - важно лишь не превращать его в другой сигнал.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/steam-update.sh
+. /usr/local/lib/pterohost/launch.sh
+
+APPID="${SRCDS_APPID:-739590}"
+CONFIG_DIR="/home/container/Configs"
+NETWORK="${CONFIG_DIR}/Network.eco"
+
+pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "/home/container/EcoServer" || true
+chmod +x /home/container/EcoServer 2>/dev/null
+
+# Configs/*.eco - обычный JSON. Правим только строку со скалярным значением,
+# чтобы не задеть вложенные объекты.
+eco_set() {
+    local file="$1" key="$2" value="$3" json
+    [ -z "$value" ] && return 0
+    [ -f "$file" ] || return 0
+
+    case "$value" in
+        ''|*[!0-9]*)
+            case "$value" in
+                true|false) json="$value" ;;
+                *) json="\"$(printf '%s' "$value" | sed 's/"/\\"/g')\"" ;;
+            esac
+            ;;
+        *) json="$value" ;;
+    esac
+
+    if grep -qE "^[[:space:]]*\"${key}\"[[:space:]]*:" "$file"; then
+        sed -i -E "s|^([[:space:]]*\"${key}\"[[:space:]]*:[[:space:]]*)(\"[^\"]*\"|[0-9]+|true|false)([[:space:]]*,?)[[:space:]]*$|\\1${json}\\3|" "$file"
+    fi
+}
+
+eco_config() {
+    mkdir -p "$CONFIG_DIR" "${DOTNET_BUNDLE_EXTRACT_BASE_DIR:-/home/container/.dotnet_bundle}"
+
+    if [ ! -f "$NETWORK" ]; then
+        pterohost_log "создаю Configs/Network.eco"
+        cat > "$NETWORK" <<JSON
+{
+  "Description": "Pterohost Eco",
+  "DiscordAddress": "",
+  "GameServerPort": ${SERVER_PORT:-3000},
+  "IPAddress": "Any",
+  "MaxConnections": ${MAX_PLAYERS:-30},
+  "Name": "${SERVER_NAME:-Pterohost Eco}",
+  "Password": "${SERVER_PASSWORD:-}",
+  "PublicServer": ${PUBLIC_SERVER:-true},
+  "RemoteAddress": "",
+  "WebServerPort": ${WEB_PORT:-3001}
+}
+JSON
+    fi
+
+    # Порт всегда берём из аллокации: сервер, слушающий не тот порт, для игроков
+    # просто не существует.
+    eco_set "$NETWORK" GameServerPort "${SERVER_PORT:-3000}"
+    eco_set "$NETWORK" WebServerPort "${WEB_PORT:-}"
+    eco_set "$NETWORK" Name "${SERVER_NAME:-}"
+    eco_set "$NETWORK" Description "${SERVER_DESC:-}"
+    eco_set "$NETWORK" MaxConnections "${MAX_PLAYERS:-}"
+    eco_set "$NETWORK" Password "${SERVER_PASSWORD:-}"
+    eco_set "$NETWORK" PublicServer "${PUBLIC_SERVER:-}"
+}
+
+eco_config
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=(/home/container/EcoServer -nogui)
+fi
+
+# Eco требует авторизации в сервисе разработчиков: без неё сервер не стартует
+# вовсе, а падает с «Authentication to Strange Cloud failed». Учётные данные -
+# владельца сервера, как ключ BeamMP или токен Factorio. Если их нет, поднимаем
+# сервер в офлайн-режиме и говорим об этом прямо, а не падаем молча.
+if [ -n "${ECO_TOKEN:-}" ]; then
+    pterohost_append_if_absent -userToken -userToken "${ECO_TOKEN}"
+elif [ -n "${ECO_USER:-}" ] && [ -n "${ECO_PASSWORD:-}" ]; then
+    pterohost_append_if_absent -username -username "${ECO_USER}"
+    pterohost_append_if_absent -password -password "${ECO_PASSWORD}"
+else
+    pterohost_log "нет учётных данных Eco - сервер поднимается в офлайн-режиме и не попадёт в общий список"
+    pterohost_append_if_absent -offline -offline
+fi
+
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"

@@ -239,6 +239,10 @@ jobs:
             dir: squad
           - tag: steam_generic
             dir: steam-generic
+          - tag: eco
+            dir: eco
+          - tag: starbound
+            dir: starbound
           - tag: source
             dir: source
           - tag: terraria
