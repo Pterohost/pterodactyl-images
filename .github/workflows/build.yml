@@ -235,6 +235,8 @@ jobs:
             dir: cs16
           - tag: barotrauma
             dir: barotrauma
+          - tag: squad
+            dir: squad
           - tag: source
             dir: source
           - tag: terraria
