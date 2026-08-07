@@ -237,6 +237,8 @@ jobs:
             dir: barotrauma
           - tag: squad
             dir: squad
+          - tag: steam_generic
+            dir: steam-generic
           - tag: source
             dir: source
           - tag: terraria
