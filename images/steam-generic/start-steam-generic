@@ -10,6 +10,8 @@
 #   QUERY_PORT_FLAG  то же для порта опроса, если он у игры есть;
 #   STOP_SIGNAL      какой сигнал слать при остановке: TERM (по умолчанию) или
 #                    INT для игр, которые сохраняют мир только по нему;
+#   GAME_LD_PATH     каталог с библиотеками игры относительно каталога сервера,
+#                    если бинарь не находит их сам (у Avorion это linux64);
 #   ADDITIONAL_ARGS  всё остальное, что владелец сервера хочет дописать.
 #
 # Чего этот образ намеренно НЕ делает: не правит конфигурации сложнее пары
@@ -41,6 +43,13 @@ if [ ! -f "/home/container/${BINARY}" ]; then
     exit 1
 fi
 chmod +x "/home/container/${BINARY}" 2>/dev/null
+
+# Часть серверов кладёт свои библиотеки рядом и не прописывает rpath: без
+# LD_LIBRARY_PATH бинарь падает на первом же .so.
+if [ -n "${GAME_LD_PATH:-}" ]; then
+    export LD_LIBRARY_PATH="/home/container/${GAME_LD_PATH}:${LD_LIBRARY_PATH:-}"
+    pterohost_log "библиотеки игры: /home/container/${GAME_LD_PATH}"
+fi
 
 # Форма записи порта у игр разная, и угадывать её нельзя: Unreal ждёт
 # Port=1234 одним аргументом, srcds-подобные - "-port 1234" двумя, часть
