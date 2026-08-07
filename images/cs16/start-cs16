@@ -1,0 +1,131 @@
+#!/bin/bash
+# Counter-Strike 1.6 на ReHLDS.
+#
+# Ванильный hlds из депо 90 давно не обновляется и держит меньше игроков на том же
+# железе, чем ReHLDS, поэтому движок подменяется сразу после установки игры. Всё,
+# что нельзя выразить статической строкой запуска - подмена движка, установка
+# Metamod и AMX Mod X, вычисленные порты - делается здесь, а сама команда живёт в
+# egg (контракт запуска, shared/launch.sh).
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/steam-update.sh
+. /usr/local/lib/pterohost/launch.sh
+
+APPID="${SRCDS_APPID:-90}"
+HLDS_GAME="${HLDS_GAME:-cstrike}"
+REHLDS_VERSION="${REHLDS_VERSION:-latest}"
+USE_REHLDS="${USE_REHLDS:-1}"
+INSTALL_METAMOD="${INSTALL_METAMOD:-0}"
+INSTALL_AMXX="${INSTALL_AMXX:-0}"
+
+pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "/home/container/hlds_linux" || true
+
+cs16_github_asset() {
+    local repo="$1" pattern="$2" tag="${3:-latest}"
+    local api="https://api.github.com/repos/${repo}/releases/${tag}"
+    [ "$tag" != "latest" ] && api="https://api.github.com/repos/${repo}/releases/tags/${tag}"
+
+    curl -fsSL "$api" 2>/dev/null \
+        | grep -o '"browser_download_url": *"[^"]*"' \
+        | cut -d'"' -f4 \
+        | grep -i "$pattern" \
+        | head -n 1
+}
+
+cs16_install_rehlds() {
+    [ "$USE_REHLDS" = "1" ] || return 0
+    [ -f /home/container/.rehlds-${REHLDS_VERSION} ] && return 0
+
+    local url
+    url="$(cs16_github_asset dreamstalker/rehlds 'rehlds-bin.*\.zip$' "$REHLDS_VERSION")"
+    if [ -z "$url" ]; then
+        pterohost_log "не нашёл сборку ReHLDS ${REHLDS_VERSION}, остаюсь на ванильном движке"
+        return 0
+    fi
+
+    pterohost_log "установка ReHLDS: $url"
+    local tmp="/home/container/.rehlds-tmp"
+    rm -rf "$tmp" && mkdir -p "$tmp"
+    if ! curl -fsSL "$url" -o "$tmp/rehlds.zip"; then
+        pterohost_log "ReHLDS не скачался, остаюсь на ванильном движке"
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    unzip -oq "$tmp/rehlds.zip" -d "$tmp" || true
+    # Раскладка архива менялась между релизами, поэтому ищем файлы, а не путь.
+    local engine
+    engine="$(find "$tmp" -name 'engine_i486.so' | head -n 1)"
+    if [ -n "$engine" ]; then
+        cp -f "$engine" /home/container/${HLDS_GAME}/../engine_i486.so 2>/dev/null \
+            || cp -f "$engine" /home/container/engine_i486.so
+        pterohost_log "движок подменён на ReHLDS"
+        rm -f /home/container/.rehlds-* 2>/dev/null
+        touch "/home/container/.rehlds-${REHLDS_VERSION}"
+    else
+        pterohost_log "в архиве ReHLDS нет engine_i486.so, остаюсь на ванильном движке"
+    fi
+    rm -rf "$tmp"
+}
+
+cs16_install_metamod() {
+    [ "$INSTALL_METAMOD" = "1" ] || return 0
+    local dir="/home/container/${HLDS_GAME}/addons/metamod"
+    [ -f "$dir/metamod.so" ] && return 0
+
+    local url
+    url="$(cs16_github_asset theAsmodai/metamod-r 'metamod.*\.zip$')"
+    [ -z "$url" ] && { pterohost_log "сборка Metamod не найдена"; return 0; }
+
+    pterohost_log "установка Metamod"
+    mkdir -p "$dir"
+    curl -fsSL "$url" -o /tmp/metamod.zip && unzip -oq /tmp/metamod.zip -d "$dir" || true
+    rm -f /tmp/metamod.zip
+
+    local plugins="/home/container/${HLDS_GAME}/liblist.gam"
+    if [ -f "$plugins" ] && ! grep -q 'addons/metamod/metamod.so' "$plugins"; then
+        sed -i 's|^gamedll_linux.*|gamedll_linux "addons/metamod/metamod.so"|' "$plugins"
+    fi
+}
+
+cs16_install_amxx() {
+    [ "$INSTALL_AMXX" = "1" ] || return 0
+    local dir="/home/container/${HLDS_GAME}/addons/amxmodx"
+    [ -d "$dir/dlls" ] && return 0
+
+    pterohost_log "установка AMX Mod X"
+    mkdir -p "/home/container/${HLDS_GAME}/addons"
+    local url="https://www.amxmodx.org/release/amxmodx-1.9.0-base-linux.tar.gz"
+    if curl -fsSL "$url" -o /tmp/amxx.tar.gz; then
+        tar -xzf /tmp/amxx.tar.gz -C "/home/container/${HLDS_GAME}" || true
+        rm -f /tmp/amxx.tar.gz
+    else
+        pterohost_log "AMX Mod X не скачался"
+        return 0
+    fi
+
+    local metaplugins="/home/container/${HLDS_GAME}/addons/metamod/plugins.ini"
+    mkdir -p "$(dirname "$metaplugins")"
+    if ! grep -qs 'amxmodx_mm_i386.so' "$metaplugins" 2>/dev/null; then
+        echo 'linux addons/amxmodx/dlls/amxmodx_mm_i386.so' >> "$metaplugins"
+    fi
+}
+
+cs16_install_rehlds
+cs16_install_metamod
+cs16_install_amxx
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=(./hlds_run -console -game "${HLDS_GAME}" -port "${SERVER_PORT}" \
+        -sport "${VAC_PORT:-26900}" +map "${SRCDS_MAP:-de_dust2}" +ip 0.0.0.0 -strictportbind -norestart)
+fi
+
+pterohost_append_if_absent +maxplayers +maxplayers "${MAX_PLAYERS:-}"
+pterohost_append_if_absent +rcon_password +rcon_password "${RCON_PASSWORD:-}"
+
+pterohost_prune_empty_args
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"
