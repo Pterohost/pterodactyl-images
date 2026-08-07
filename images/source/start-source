@@ -49,6 +49,12 @@ fi
 
 # Слоты: главное, ради чего этот образ существует.
 pterohost_append_if_absent -maxplayers -maxplayers "${MAX_PLAYERS}"
+
+# У Left 4 Dead 2 движковый -maxplayers сам по себе не поднимает лобби выше
+# четырёх: реальный потолок игроков задаёт cvar sv_maxplayers.
+if [ "${GAME}" = "left4dead2" ]; then
+    pterohost_append_if_absent +sv_maxplayers +sv_maxplayers "${MAX_PLAYERS}"
+fi
 pterohost_append_if_absent +map +map "${MAP}"
 
 # Тикрейт понимают не все игры семейства: у L4D2 и Insurgency он фиксирован
