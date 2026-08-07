@@ -126,6 +126,6 @@ fi
 pterohost_append_if_absent +maxplayers +maxplayers "${MAX_PLAYERS:-}"
 pterohost_append_if_absent +rcon_password +rcon_password "${RCON_PASSWORD:-}"
 
-pterohost_prune_empty_args
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 exec "${PTEROHOST_ARGS[@]}"

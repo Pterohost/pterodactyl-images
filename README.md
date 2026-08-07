@@ -48,6 +48,8 @@ License: MIT
 | `satisfactory` | Satisfactory | `steamcmd_base` | amd64 | Steam app `1690800`. Query interfaces bound to all interfaces. |
 | `dayz` | DayZ | `steamcmd_base` | amd64 | Steam app `223350`, **authenticated depot**. Syncs `steamQueryPort`. |
 | `arma3` | Arma 3 | `steamcmd_base` | amd64 | Steam app `233780`, **authenticated depot**. |
+| `cs16` | Counter-Strike 1.6 (ReHLDS) | `steamcmd_base` | amd64 | Steam app `90`. ReHLDS engine swap, optional Metamod and AMX Mod X. |
+| `terraria` | Terraria: vanilla, TShock, tModLoader | `ghcr.io/pelican-eggs/yolks:dotnet_9` | amd64 | Not a Steam app. Ships .NET 8 **and** 9 - TShock 6.1 needs 9, tModLoader is built for 8. Core picked by `TERRARIA_CORE`. |
 
 The `steamcmd_base` tag carries SteamCMD (in `/opt/steamcmd`, world-rwx because
 Wings runs the container under its own uid), the 32-bit runtime SteamCMD needs,

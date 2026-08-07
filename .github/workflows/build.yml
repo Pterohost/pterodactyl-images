@@ -233,6 +233,10 @@ jobs:
             dir: arma3
           - tag: cs16
             dir: cs16
+          - tag: terraria
+            dir: terraria
+            # FROM yolks:dotnet_9, а не steamcmd_base: сервер Terraria и его
+            # ядра ставятся не из Steam, а с terraria.org и GitHub.
 
     steps:
       - name: Checkout
