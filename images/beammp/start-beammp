@@ -1,0 +1,162 @@
+#!/bin/bash
+# BeamMP: сервер мультиплеера для BeamNG.drive.
+#
+# Сам сервер - один статический бинарь с GitHub. Единственное, что здесь по
+# настоящему важно, - выбрать правильный ассет релиза: BeamMP выкладывает
+# отдельные файлы под debian.12, debian.13, ubuntu.22.04 и ubuntu.24.04, и
+# апстримный egg с его шаблоном Server-debian не находит ни одного из них.
+# Поэтому дистрибутив и архитектура берутся из самого образа.
+#
+# Конфигурация - ServerConfig.toml. Панель ini-парсером его не возьмёт: в TOML
+# строковые значения обязаны быть в кавычках, а ini-парсер их снимет и сломает
+# файл. Поэтому конфиг ведёт этот скрипт: создаёт при первом запуске и
+# синхронизирует поля, которыми владеет панель, оставляя остальное как есть.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/launch.sh
+
+BEAMMP_VERSION="${BEAMMP_VERSION:-latest}"
+CONFIG="/home/container/ServerConfig.toml"
+BINARY="/home/container/BeamMP-Server"
+
+beammp_asset_suffix() {
+    local arch distro codename
+    arch="$(uname -m)"
+    distro="debian"
+    codename="12"
+
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release
+        case "${ID:-debian}" in
+            ubuntu) distro="ubuntu"; codename="${VERSION_ID:-24.04}" ;;
+            *)      distro="debian"; codename="${VERSION_ID:-12}" ;;
+        esac
+    fi
+
+    printf '%s.%s.%s' "$distro" "$codename" "$arch"
+}
+
+beammp_download_url() {
+    local suffix="$1" tag="${2:-latest}"
+    local api="https://api.github.com/repos/BeamMP/BeamMP-Server/releases/${tag}"
+    [ "$tag" != "latest" ] && api="https://api.github.com/repos/BeamMP/BeamMP-Server/releases/tags/${tag}"
+
+    curl -fsSL "$api" 2>/dev/null \
+        | grep -o '"browser_download_url": *"[^"]*"' \
+        | cut -d'"' -f4 \
+        | grep -F "BeamMP-Server.${suffix}" \
+        | head -n 1
+}
+
+beammp_install() {
+    local suffix url
+    suffix="$(beammp_asset_suffix)"
+
+    [ -x "$BINARY" ] && [ -f "/home/container/.beammp-${BEAMMP_VERSION}-${suffix}" ] && return 0
+
+    url="$(beammp_download_url "$suffix" "$BEAMMP_VERSION")"
+    if [ -z "$url" ]; then
+        pterohost_log "не нашёл сборку BeamMP ${BEAMMP_VERSION} под ${suffix}"
+        pterohost_log "проверьте список файлов релиза: github.com/BeamMP/BeamMP-Server/releases"
+        return 1
+    fi
+
+    pterohost_log "установка BeamMP: $url"
+    if ! curl -fsSL "$url" -o "${BINARY}.new"; then
+        pterohost_log "сборка не скачалась"
+        rm -f "${BINARY}.new"
+        return 1
+    fi
+
+    chmod +x "${BINARY}.new"
+    mv -f "${BINARY}.new" "$BINARY"
+    rm -f /home/container/.beammp-* 2>/dev/null
+    touch "/home/container/.beammp-${BEAMMP_VERSION}-${suffix}"
+}
+
+# Значение для TOML: числа и true/false идут как есть, остальное в кавычках.
+beammp_toml_value() {
+    case "$1" in
+        ''|*[!0-9]*)
+            case "$1" in
+                true|false) printf '%s' "$1" ;;
+                *) printf '"%s"' "$(printf '%s' "$1" | sed 's/"/\\"/g')" ;;
+            esac
+            ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# Правит одно поле в секции [General], не трогая остальные строки файла.
+beammp_set() {
+    local key="$1" value="$2" formatted
+    [ -z "$value" ] && return 0
+    formatted="$(beammp_toml_value "$value")"
+
+    if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$CONFIG"; then
+        sed -i -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${formatted}|" "$CONFIG"
+    else
+        sed -i "/^\[General\]/a ${key} = ${formatted}" "$CONFIG"
+    fi
+}
+
+beammp_config() {
+    if [ ! -f "$CONFIG" ]; then
+        pterohost_log "создаю ServerConfig.toml"
+        cat > "$CONFIG" <<'TOML'
+[General]
+Name = "Pterohost BeamMP"
+Port = 30814
+AuthKey = ""
+MaxCars = 1
+MaxPlayers = 8
+Map = "/levels/gridmap_v2/info.json"
+Description = "BeamMP server"
+ResourceFolder = "Resources"
+Private = true
+LogChat = true
+Debug = false
+Tags = "Freeroam"
+# Ключи ниже сервер ждёт всегда: без них он на каждом старте пишет
+# «Value ... has unexpected type» и берёт своё умолчание.
+IP = "0.0.0.0"
+AllowGuests = true
+InformationPacket = true
+
+[Misc]
+ImScaredOfUpdates = true
+SendErrors = true
+SendErrorsShowMessage = true
+UpdateReminderTime = "30s"
+TOML
+    fi
+
+    # Порт всегда берём из аллокации: сервер, слушающий не тот порт, недоступен
+    # игрокам, а панель всё равно показывает выданный.
+    beammp_set Port "${SERVER_PORT:-30814}"
+    beammp_set AuthKey "${AUTH_KEY:-}"
+    beammp_set Name "${SERVER_NAME:-}"
+    beammp_set MaxPlayers "${MAX_PLAYERS:-}"
+    beammp_set MaxCars "${MAX_CARS:-}"
+    beammp_set Map "${SERVER_MAP:-}"
+    beammp_set Description "${SERVER_DESC:-}"
+    beammp_set Private "${SERVER_PRIVATE:-}"
+
+    mkdir -p /home/container/Resources/Client /home/container/Resources/Server
+}
+
+beammp_install || exit 1
+beammp_config
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    # Флаги BeamMP только в форме --ключ=значение: с пробелом он ругается
+    # «expects a value, but no value was given» и не стартует.
+    PTEROHOST_ARGS=("$BINARY" "--config=${CONFIG}" "--port=${SERVER_PORT:-30814}")
+fi
+
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"

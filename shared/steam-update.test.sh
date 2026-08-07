@@ -194,5 +194,45 @@ pterohost_steam_update 380870 public 0 "${SENTINEL}" >/dev/null 2>&1
 check "ветка public не превращается в -beta public" "0" \
     "$(grep -c -- '-beta' "${FAKE_CALLS}")"
 
+# --- пароль закрытой ветки ------------------------------------------------
+# Переменная SRCDS_BETAPASS жила в яйцах, но её никто не читал: пароль до
+# SteamCMD не доходил, и сервер молча оставался на публичной ветке.
+reset_case
+export FAKE_DOWNLOADS=1 FAKE_OUTPUT="Success! App '380870' fully installed."
+cat > "${STEAMCMD_RUN}/steamcmd.sh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${FAKE_CALLS}"
+case "$*" in
+    *app_update*) ;;
+    *) exit 0 ;;
+esac
+printf '%s\n' "${FAKE_OUTPUT}"
+: > "${FAKE_SENTINEL}"
+exit 0
+STUB
+chmod +x "${STEAMCMD_RUN}/steamcmd.sh"
+SRCDS_BETAPASS=hunter2 pterohost_steam_update 380870 experimental 0 "${SENTINEL}" >/dev/null 2>&1
+check "пароль закрытой ветки уходит в SteamCMD" "1" \
+    "$(grep -c -- '-betapassword hunter2' "${FAKE_CALLS}")"
+
+reset_case
+export FAKE_DOWNLOADS=1 FAKE_OUTPUT="Success! App '380870' fully installed."
+cat > "${STEAMCMD_RUN}/steamcmd.sh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${FAKE_CALLS}"
+case "$*" in
+    *app_update*) ;;
+    *) exit 0 ;;
+esac
+printf '%s\n' "${FAKE_OUTPUT}"
+: > "${FAKE_SENTINEL}"
+exit 0
+STUB
+chmod +x "${STEAMCMD_RUN}/steamcmd.sh"
+unset SRCDS_BETAPASS
+pterohost_steam_update 380870 experimental 0 "${SENTINEL}" >/dev/null 2>&1
+check "без пароля лишнего флага в команде нет" "0" \
+    "$(grep -c -- '-betapassword' "${FAKE_CALLS}")"
+
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

@@ -71,7 +71,14 @@ pterohost_steam_update() {
 
     case "${branch}" in
         public|"") ;;                          # default branch takes no -beta
-        *) branch_args=(-beta "${branch}") ;;
+        *)
+            branch_args=(-beta "${branch}")
+            # Закрытые ветки требуют пароль. Переменная SRCDS_BETAPASS есть в
+            # яйцах с 2024 года, но её никто не читал: пароль в SteamCMD не
+            # попадал вовсе, а STEAM_BRANCH_FALLBACK молча возвращал сервер на
+            # публичную ветку - клиент видел «ветка выбрана», а получал не её.
+            [ -n "${SRCDS_BETAPASS:-}" ] && branch_args+=(-betapassword "${SRCDS_BETAPASS}")
+            ;;
     esac
     [ "${validate}" = "1" ] && validate_arg=(validate)
 

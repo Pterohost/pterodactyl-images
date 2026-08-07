@@ -41,9 +41,18 @@ if [ ! -f /home/container/srcds_run ]; then
     fi
 fi
 
+# Часть депо (например Insurgency, app 237410) вообще не кладёт srcds_run -
+# только сам бинарь srcds_linux. Апстримный egg этого не учитывает и запускает
+# ./srcds_run, которого нет: сервер падает сразу, ещё до установки.
+SRCDS_BINARY="./srcds_run"
+if [ ! -f "${PWD}/srcds_run" ] && [ -f "${PWD}/srcds_linux" ]; then
+    SRCDS_BINARY="./srcds_linux"
+    pterohost_log "srcds_run отсутствует, запускаю srcds_linux"
+fi
+
 pterohost_panel_argv "$@"
 if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
-    PTEROHOST_ARGS=(./srcds_run -game "${GAME}" -console -port "${SERVER_PORT:-27015}" \
+    PTEROHOST_ARGS=("${SRCDS_BINARY}" -game "${GAME}" -console -port "${SERVER_PORT:-27015}" \
         +ip 0.0.0.0 -norestart)
 fi
 
