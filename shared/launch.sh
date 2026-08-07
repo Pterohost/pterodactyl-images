@@ -187,7 +187,7 @@ pterohost_append_if_absent() {
 # out of sight - printing the resolved command then handed them straight back to
 # the console, where the server log and every screenshot a customer sends to
 # support carries the RCON password and the GSLT.
-PTEROHOST_SECRET_FLAGS="${PTEROHOST_SECRET_FLAGS:-+rcon_password +sv_setsteamaccount +rcon.password -adminpassword -serverpassword -password +sv_password +sv_downloadurl_password}"
+PTEROHOST_SECRET_FLAGS="${PTEROHOST_SECRET_FLAGS:-+rcon_password +sv_setsteamaccount +rcon.password -adminpassword -serverpassword -password +sv_password +sv_downloadurl_password -userToken -password -username}"
 
 # pterohost_is_secret_flag <flag>
 pterohost_is_secret_flag() {

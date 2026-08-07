@@ -1,0 +1,100 @@
+#!/bin/bash
+# Starbound: выделенный сервер.
+#
+# Две особенности, из-за которых игре нужен свой образ:
+#   - депо 533830 анонимно не отдаётся (SteamCMD отвечает «No subscription»),
+#     поэтому обновление идёт под аккаунтом, владеющим игрой: переменные
+#     STEAM_USER и STEAM_PASS читает pterohost_steam_login_args;
+#   - порт задаётся ключом gameServerPort в storage/starbound_server.config, и
+#     этого файла после чистой установки ещё нет: его создаёт сервер на первом
+#     запуске. Значит выданный панелью порт до него не доходит, пока файл не
+#     подготовлен заранее.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/steam-update.sh
+. /usr/local/lib/pterohost/launch.sh
+
+APPID="${SRCDS_APPID:-533830}"
+STORAGE="/home/container/storage"
+CONFIG="${STORAGE}/starbound_server.config"
+BINARY="/home/container/linux/starbound_server"
+
+if [ -z "${STEAM_USER:-}" ] || [ "${STEAM_USER:-anonymous}" = "anonymous" ]; then
+    pterohost_log "депо Starbound не отдаётся анонимно - укажите аккаунт Steam, владеющий игрой"
+fi
+
+pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "${BINARY}" || true
+
+if [ ! -f "$BINARY" ]; then
+    pterohost_log "сервер не установлен: проверьте аккаунт Steam и его права на Starbound"
+    exit 1
+fi
+chmod +x "$BINARY" 2>/dev/null
+
+starbound_set() {
+    local key="$1" value="$2" json
+    [ -z "$value" ] && return 0
+
+    case "$value" in
+        ''|*[!0-9]*)
+            case "$value" in
+                true|false) json="$value" ;;
+                *) json="\"$(printf '%s' "$value" | sed 's/"/\\"/g')\"" ;;
+            esac
+            ;;
+        *) json="$value" ;;
+    esac
+
+    if grep -qE "^[[:space:]]*\"${key}\"[[:space:]]*:" "$CONFIG"; then
+        sed -i -E "s|^([[:space:]]*\"${key}\"[[:space:]]*:[[:space:]]*)(\"[^\"]*\"|[0-9]+|true|false)([[:space:]]*,?)[[:space:]]*$|\\1${json}\\3|" "$CONFIG"
+    fi
+}
+
+starbound_config() {
+    mkdir -p "$STORAGE" /home/container/mods
+
+    if [ ! -f "$CONFIG" ]; then
+        pterohost_log "создаю storage/starbound_server.config"
+        cat > "$CONFIG" <<JSON
+{
+  "allowAdminCommands" : true,
+  "allowAdminCommandsFromAnyone" : false,
+  "allowAnonymousConnections" : true,
+  "anonymousConnectionsAreAdmin" : false,
+  "clearPlayerFiles" : false,
+  "clearUniverseFiles" : false,
+  "gameServerPort" : ${SERVER_PORT:-21025},
+  "maxPlayers" : ${MAX_PLAYERS:-8},
+  "serverName" : "${SERVER_NAME:-Pterohost Starbound}",
+  "serverFidelity" : "automatic",
+  "serverPasswords" : [],
+  "runQueryServer" : false,
+  "queryServerPort" : ${QUERY_PORT:-21025},
+  "checkAssetsDigest" : false
+}
+JSON
+    fi
+
+    starbound_set gameServerPort "${SERVER_PORT:-21025}"
+    starbound_set maxPlayers "${MAX_PLAYERS:-}"
+    starbound_set serverName "${SERVER_NAME:-}"
+    starbound_set serverFidelity "${SERVER_FIDELITY:-}"
+    starbound_set allowAnonymousConnections "${ALLOW_ANONYMOUS:-}"
+
+    # Опрос по игровому протоколу выключен у Starbound по умолчанию и на нашей
+    # стороне не поддержан - счётчик игроков этой игре не обещаем.
+    starbound_set runQueryServer false
+}
+
+starbound_config
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=("$BINARY")
+fi
+
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"
