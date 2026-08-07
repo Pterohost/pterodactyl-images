@@ -231,6 +231,8 @@ jobs:
             dir: dayz
           - tag: arma3
             dir: arma3
+          - tag: cs16
+            dir: cs16
 
     steps:
       - name: Checkout
