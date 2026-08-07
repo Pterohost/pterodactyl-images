@@ -233,10 +233,19 @@ jobs:
             dir: arma3
           - tag: cs16
             dir: cs16
+          - tag: barotrauma
+            dir: barotrauma
           - tag: source
             dir: source
           - tag: terraria
             dir: terraria
+          - tag: beammp
+            dir: beammp
+            # FROM yolks:debian - сервер BeamMP это один бинарь с GitHub,
+            # SteamCMD ему не нужен.
+          - tag: factorio
+            dir: factorio
+            # FROM yolks:debian - headless Factorio качается с factorio.com.
             # FROM yolks:dotnet_9, а не steamcmd_base: сервер Terraria и его
             # ядра ставятся не из Steam, а с terraria.org и GitHub.
 

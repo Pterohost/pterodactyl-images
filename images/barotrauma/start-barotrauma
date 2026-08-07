@@ -1,0 +1,79 @@
+#!/bin/bash
+# Barotrauma: выделенный сервер.
+#
+# Главное, ради чего образ существует: довести до сервера порт, выданный
+# панелью. Barotrauma хранит его атрибутом корневого элемента
+# serversettings.xml (port="27015" queryport="27016"), командную строку не
+# слушает, а xml-парсер панели правит элементы, а не атрибуты корня - поэтому
+# апстримный egg оставлял сервер на 27015 при любой аллокации.
+#
+# Потолок игроков у движка - 16 (NetConfig.MaxPlayers), значение выше сервер
+# молча урезает, поэтому образ его тоже ограничивает и говорит об этом в лог.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/steam-update.sh
+. /usr/local/lib/pterohost/launch.sh
+
+APPID="${SRCDS_APPID:-1026340}"
+SETTINGS="/home/container/serversettings.xml"
+MAX_PLAYERS_CAP=16
+
+pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "/home/container/DedicatedServer" || true
+
+# Правка одного атрибута корневого элемента. Файл создаёт сам сервер при первом
+# запуске, поэтому здесь только точечная подстановка значений.
+baro_set() {
+    local key="$1" value="$2"
+    [ -z "$value" ] && return 0
+
+    if grep -q "[[:space:]]${key}=\"" "$SETTINGS"; then
+        sed -i -E "s|([[:space:]]${key}=\")[^\"]*(\")|\\1${value}\\2|" "$SETTINGS"
+    else
+        # Атрибута нет - дописываем сразу после открывающего тега.
+        sed -i -E "s|(<serversettings)|\\1\n  ${key}=\"${value}\"|" "$SETTINGS"
+    fi
+}
+
+baro_settings() {
+    if [ ! -f "$SETTINGS" ]; then
+        pterohost_log "создаю serversettings.xml"
+        cat > "$SETTINGS" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<serversettings
+  port="${SERVER_PORT:-27015}"
+  queryport="${QUERY_PORT:-27016}"
+  password="${SERVER_PASSWORD:-}"
+  enableupnp="false"
+  ServerName="${SERVER_NAME:-Pterohost Barotrauma}"
+  MaxPlayers="${MAX_PLAYERS:-8}"
+  IsPublic="${SERVER_PUBLIC:-True}"
+  AutoRestart="true" />
+XML
+    fi
+
+    local players="${MAX_PLAYERS:-}"
+    if [ -n "$players" ] && [ "$players" -gt "$MAX_PLAYERS_CAP" ] 2>/dev/null; then
+        pterohost_log "у Barotrauma потолок ${MAX_PLAYERS_CAP} игроков, ${players} не будет принято движком - ставлю ${MAX_PLAYERS_CAP}"
+        players="$MAX_PLAYERS_CAP"
+    fi
+
+    baro_set port "${SERVER_PORT:-27015}"
+    baro_set queryport "${QUERY_PORT:-27016}"
+    baro_set ServerName "${SERVER_NAME:-}"
+    baro_set MaxPlayers "$players"
+    baro_set password "${SERVER_PASSWORD:-}"
+    baro_set IsPublic "${SERVER_PUBLIC:-}"
+}
+
+baro_settings
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=(./DedicatedServer -batchmode -nographics)
+fi
+
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+exec "${PTEROHOST_ARGS[@]}"

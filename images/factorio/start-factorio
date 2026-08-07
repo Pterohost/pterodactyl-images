@@ -1,0 +1,160 @@
+#!/bin/bash
+# Factorio headless.
+#
+# Что здесь важно:
+#   - версия. factorio.com отдаёт архив по каналу (stable, experimental) или по
+#     точному номеру. Канал по умолчанию - stable: на нём остаются рабочими моды.
+#   - слоты. У апстримных eggs переменная числа игроков закрыта от клиента, а
+#     панель переписывает max_players на каждом старте. Здесь наоборот: файл
+#     настроек принадлежит владельцу сервера, а образ синхронизирует только те
+#     поля, которые пришли переменными, и только если они заданы.
+#   - сохранение. Factorio дописывает игру по SIGINT, поэтому образ ловит
+#     остановку и передаёт серверу именно его.
+
+set -u
+cd /home/container || exit 1
+
+. /usr/local/lib/pterohost/launch.sh
+
+FACTORIO_VERSION="${FACTORIO_VERSION:-stable}"
+SAVE_NAME="${SAVE_NAME:-pterohost}"
+DATA_DIR="/home/container/data"
+SETTINGS="${DATA_DIR}/server-settings.json"
+ADMINLIST="${DATA_DIR}/server-adminlist.json"
+WHITELIST="${DATA_DIR}/server-whitelist.json"
+SAVES_DIR="/home/container/saves"
+
+factorio_install() {
+    [ -x /home/container/bin/x64/factorio ] \
+        && [ -f "/home/container/.factorio-${FACTORIO_VERSION}" ] && return 0
+
+    local url="https://factorio.com/get-download/${FACTORIO_VERSION}/headless/linux64"
+    pterohost_log "установка Factorio (${FACTORIO_VERSION})"
+
+    local tmp="/home/container/.factorio-tmp"
+    rm -rf "$tmp" && mkdir -p "$tmp"
+    if ! curl -fsSL "$url" -o "$tmp/factorio.tar.xz"; then
+        pterohost_log "не скачался $url - проверьте FACTORIO_VERSION (stable, experimental или точный номер вида 2.0.77)"
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    tar -xJf "$tmp/factorio.tar.xz" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+    # Архив разворачивается в каталог factorio/ - переносим его содержимое в
+    # корень тома, чтобы пути совпадали с тем, что ожидает панель.
+    cp -R "$tmp/factorio/." /home/container/
+    rm -rf "$tmp"
+    chmod +x /home/container/bin/x64/factorio
+    rm -f /home/container/.factorio-* 2>/dev/null
+    touch "/home/container/.factorio-${FACTORIO_VERSION}"
+}
+
+# Правка одного поля в JSON без сторонних утилит: значение подставляется как
+# есть для чисел и true/false, иначе в кавычках.
+factorio_set() {
+    local key="$1" value="$2" json
+    [ -z "$value" ] && return 0
+
+    case "$value" in
+        ''|*[!0-9]*)
+            case "$value" in
+                true|false) json="$value" ;;
+                *) json="\"$(printf '%s' "$value" | sed 's/"/\\"/g')\"" ;;
+            esac
+            ;;
+        *) json="$value" ;;
+    esac
+
+    # Правим только строку вида «"ключ": скаляр» - многострочные объекты и
+    # массивы не трогаем ни при каких обстоятельствах.
+    if grep -qE "^[[:space:]]*\"${key}\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|[0-9]+|true|false)[[:space:]]*,?[[:space:]]*$" "$SETTINGS"; then
+        sed -i -E "s|^([[:space:]]*\"${key}\"[[:space:]]*:[[:space:]]*)(\"[^\"]*\"|[0-9]+|true|false)([[:space:]]*,?)[[:space:]]*$|\\1${json}\\3|" "$SETTINGS"
+    fi
+}
+
+factorio_settings() {
+    mkdir -p "$DATA_DIR" "$SAVES_DIR"
+
+    if [ ! -f "$SETTINGS" ]; then
+        pterohost_log "создаю data/server-settings.json"
+        # За основу берём пример из поставки: в нём все поля текущей версии,
+        # включая те, которых мы не касаемся.
+        if [ -f "${DATA_DIR}/server-settings.example.json" ]; then
+            # В примере от разработчиков комментарии - это обычные поля
+            # "_comment_visibility": [ ... ] на несколько строк. Выкусывать их
+            # построчно нельзя: остаются висящие скобки, и сервер падает с
+            # «Unexpected character». Поэтому пример берётся целиком.
+            cp "${DATA_DIR}/server-settings.example.json" "$SETTINGS"
+        else
+            cat > "$SETTINGS" <<'JSON'
+{
+  "name": "Pterohost Factorio",
+  "description": "Factorio server",
+  "max_players": 0,
+  "visibility": { "public": false, "lan": true },
+  "username": "",
+  "token": "",
+  "game_password": "",
+  "require_user_verification": true,
+  "autosave_interval": 10,
+  "autosave_slots": 5,
+  "afk_autokick_interval": 0
+}
+JSON
+        fi
+    fi
+
+    [ -f "$ADMINLIST" ] || echo '[]' > "$ADMINLIST"
+    [ -f "$WHITELIST" ] || echo '[]' > "$WHITELIST"
+
+    factorio_set name "${SERVER_NAME:-}"
+    factorio_set description "${SERVER_DESC:-}"
+    factorio_set max_players "${MAX_PLAYERS:-}"
+    factorio_set game_password "${SERVER_PASSWORD:-}"
+    factorio_set username "${FACTORIO_USERNAME:-}"
+    factorio_set token "${FACTORIO_TOKEN:-}"
+}
+
+factorio_save() {
+    if [ -f "${SAVES_DIR}/${SAVE_NAME}.zip" ]; then
+        return 0
+    fi
+    pterohost_log "создаю карту ${SAVE_NAME}"
+    /home/container/bin/x64/factorio --create "${SAVES_DIR}/${SAVE_NAME}.zip" >/dev/null 2>&1 \
+        || pterohost_log "карта не создалась, сервер попробует загрузить существующую"
+}
+
+factorio_install || exit 1
+factorio_settings
+factorio_save
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=(/home/container/bin/x64/factorio
+        --start-server "${SAVES_DIR}/${SAVE_NAME}.zip"
+        --server-settings "$SETTINGS"
+        --server-adminlist "$ADMINLIST"
+        --port "${SERVER_PORT:-34197}")
+fi
+
+# Белый список включается флагом: у апстримного egg файл есть, а флага нет -
+# то есть список лежит и не действует.
+if [ "${USE_WHITELIST:-0}" = "1" ]; then
+    pterohost_append_if_absent --server-whitelist --server-whitelist "$WHITELIST"
+    pterohost_append_if_absent --use-server-whitelist --use-server-whitelist
+fi
+
+if [ -n "${RCON_PASSWORD:-}" ]; then
+    pterohost_append_if_absent --rcon-port --rcon-port "${RCON_PORT:-${SERVER_PORT:-34197}}"
+    pterohost_append_if_absent --rcon-password --rcon-password "${RCON_PASSWORD}"
+fi
+
+pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+
+# Factorio сохраняет игру по SIGINT и игнорирует SIGTERM от Wings, поэтому
+# останов переводится в тот сигнал, который сервер понимает.
+"${PTEROHOST_ARGS[@]}" &
+CHILD=$!
+trap 'kill -INT "${CHILD}" 2>/dev/null' TERM INT
+wait "${CHILD}"
