@@ -49,6 +49,7 @@ License: MIT
 | `dayz` | DayZ | `steamcmd_base` | amd64 | Steam app `223350`, **authenticated depot**. Syncs `steamQueryPort`. |
 | `arma3` | Arma 3 | `steamcmd_base` | amd64 | Steam app `233780`, **authenticated depot**. |
 | `cs16` | Counter-Strike 1.6 (ReHLDS) | `steamcmd_base` | amd64 | Steam app `90`. ReHLDS engine swap, optional Metamod and AMX Mod X. |
+| `source` | Source dedicated server (srcds) | `steamcmd_base` | amd64 | TF2, CS:S, DoD:S, HL2:DM, Left 4 Dead 2, Insurgency, Black Mesa. Game picked by `SRCDS_APPID` + `SRCDS_GAME`. Unlike the upstream egg, **slots are settable** (`MAX_PLAYERS`), plus tickrate, SourceTV and hidden GSLT/RCON. |
 | `terraria` | Terraria: vanilla, TShock, tModLoader | `ghcr.io/pelican-eggs/yolks:dotnet_9` | amd64 | Not a Steam app. Ships .NET 8 **and** 9 - TShock 6.1 needs 9, tModLoader is built for 8. Core picked by `TERRARIA_CORE`. |
 
 The `steamcmd_base` tag carries SteamCMD (in `/opt/steamcmd`, world-rwx because
