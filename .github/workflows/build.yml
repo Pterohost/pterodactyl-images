@@ -265,3 +265,64 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
             org.opencontainers.image.url=https://github.com/Pterohost/pterodactyl-images
+
+  runtime:
+    name: "${{ matrix.tag }}"
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Один Dockerfile и один start-runtime на все рантаймы: различается
+          # только базовый образ, поэтому bootstrap ботов и скриптов чинится в
+          # одном месте, а не в десятке форков generic-eggs.
+          - { tag: runtime_nodejs_24,  base: "ghcr.io/pelican-eggs/yolks:nodejs_24",  kind: node,    title: "Node.js 24" }
+          - { tag: runtime_nodejs_22,  base: "ghcr.io/pelican-eggs/yolks:nodejs_22",  kind: node,    title: "Node.js 22 LTS" }
+          - { tag: runtime_bun,        base: "ghcr.io/pelican-eggs/yolks:bun_latest", kind: bun,     title: "Bun" }
+          - { tag: runtime_python_313, base: "ghcr.io/pelican-eggs/yolks:python_3.13", kind: python, title: "Python 3.13" }
+          - { tag: runtime_python_312, base: "ghcr.io/pelican-eggs/yolks:python_3.12", kind: python, title: "Python 3.12" }
+          - { tag: runtime_java_21,    base: "ghcr.io/pterohost/pterodactyl-images:java_21", kind: java, title: "Java 21 LTS" }
+          - { tag: runtime_dotnet_9,   base: "ghcr.io/pelican-eggs/yolks:dotnet_9",   kind: dotnet,  title: ".NET 9" }
+          - { tag: runtime_go_123,     base: "ghcr.io/pelican-eggs/yolks:go_1.23",    kind: go,      title: "Go 1.23" }
+          - { tag: runtime_rust,       base: "ghcr.io/pelican-eggs/yolks:rust_latest", kind: rust,   title: "Rust" }
+          - { tag: runtime_elixir,     base: "ghcr.io/pelican-eggs/yolks:elixir_latest", kind: elixir, title: "Elixir" }
+          - { tag: runtime_dart,       base: "ghcr.io/pelican-eggs/yolks:dart_stable", kind: dart,   title: "Dart" }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./images/runtime/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: true
+          sbom: true
+          build-args: |
+            BASE_IMAGE=${{ matrix.base }}
+            RUNTIME_KIND=${{ matrix.kind }}
+            RUNTIME_TITLE=${{ matrix.title }}
+          tags: |
+            ghcr.io/pterohost/pterodactyl-images:${{ matrix.tag }}
+            ghcr.io/pterohost/pterodactyl-images:${{ matrix.tag }}-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.url=https://github.com/Pterohost/pterodactyl-images
