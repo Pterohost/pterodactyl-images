@@ -25,9 +25,22 @@
 STEAMCMD_RUN="${STEAMCMD_RUN:-/home/container/.steamcmd}"
 
 # pterohost_mods_dedupe <list>
-#   Normalises a semicolon list into a sorted, de-duplicated, semicolon-
-#   terminated one. Sorted, not first-seen: it is what the previous image did, so
-#   servers keep the load order they have been running with.
+#   Normalises a semicolon list into a de-duplicated, semicolon-terminated one,
+#   KEEPING THE ORDER IT WAS GIVEN.
+#
+#   This used to `sort -u`, justified in a comment as "what the previous image
+#   did, so servers keep the load order they have been running with". Both
+#   halves were wrong. The order is not incidental in these games: -mod= is
+#   evaluated left to right and a mod that overrides another has to come after
+#   it, which is why every DayZ Expansion install guide is an ordered list
+#   (@CF, then @DayZ-Expansion-Licensed, then @DayZ-Expansion-Core, then the
+#   modules). Sorting replaced the owner's list with an alphabetical one - on
+#   server 3946 it moved @VPPAdminTools from last position to third and put the
+#   main Expansion bundle ahead of Expansion-Core - and the owner had no way to
+#   express what they wanted, because whatever they typed got re-sorted.
+#
+#   `awk '!seen[$0]++'` is first-seen-wins and is portable across mawk, gawk and
+#   busybox awk, all three of which turn up in these images.
 pterohost_mods_dedupe() {
     local list="$1"
 
@@ -37,7 +50,7 @@ pterohost_mods_dedupe() {
         | tr ';' '\n' \
         | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
         | grep -v '^$' \
-        | sort -u \
+        | awk '!seen[$0]++' \
         | tr '\n' ';'
 }
 
@@ -45,13 +58,18 @@ pterohost_mods_dedupe() {
 #   Pulls the workshop ids out of a launcher-exported modlist.html. Both the DayZ
 #   and the Arma 3 launcher write the id into a steamcommunity filedetails link,
 #   which is the one part of that HTML that has never changed shape.
+#
+#   Order is preserved, and that is the whole point of reading this file: the
+#   launcher writes the rows in the exact order the player arranged them, so the
+#   export IS the load order. `sort -u` here threw away the one piece of
+#   information the file exists to carry.
 pterohost_mods_from_launcher() {
     local file="$1"
 
     [ -f "${file}" ] || return 1
 
     local ids
-    ids="$(grep -oE 'filedetails/\?id=[0-9]+' "${file}" 2>/dev/null | grep -oE '[0-9]+' | sort -u)"
+    ids="$(grep -oE 'filedetails/\?id=[0-9]+' "${file}" 2>/dev/null | grep -oE '[0-9]+' | awk '!seen[$0]++')"
 
     [ -n "${ids}" ] || return 1
 
@@ -116,10 +134,32 @@ pterohost_mods_lowercase() {
 #   Last update of a workshop item, in epoch seconds, from its changelog page.
 #   Empty when Steam cannot be reached - the caller then leaves an installed mod
 #   alone rather than re-downloading the whole collection on every boot.
+#
+#   The User-Agent is load-bearing, not politeness. Steam answers curl's default
+#   `curl/x.y.z` UA with HTTP 429 and a short non-HTML body; the same request
+#   with a browser UA, from the same address a second later, returns 200 and the
+#   full page. Measured 2026-08-08:
+#
+#     default UA -> http=429 bytes=5873   -> no mtime parsed
+#     browser UA -> http=200 bytes=58384  -> mtime 1771519119
+#
+#   Because a parse failure is indistinguishable from "not updated", this made
+#   the whole refresh path dead: every mod was downloaded once, when @<id> was
+#   absent, and then frozen forever. When an author publishes an update Steam
+#   updates every player's client automatically and the server, still on the old
+#   version, rejects all of them - which is exactly the failure this file's
+#   header says the feature exists to prevent.
+#
+#   `--compressed` because a browser UA invites a gzipped response, and the
+#   caller greps the body as text.
+PTEROHOST_WORKSHOP_UA="${PTEROHOST_WORKSHOP_UA:-Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36}"
+
 pterohost_workshop_remote_mtime() {
     local id="$1"
 
-    curl -sL --max-time 20 "https://steamcommunity.com/sharedfiles/filedetails/changelog/${id}" 2>/dev/null \
+    curl -sL --compressed --max-time 20 \
+        -A "${PTEROHOST_WORKSHOP_UA}" \
+        "https://steamcommunity.com/sharedfiles/filedetails/changelog/${id}" 2>/dev/null \
         | grep '<p id=' | head -1 | cut -d'"' -f2 | grep -E '^[0-9]+$'
 }
 
@@ -213,7 +253,15 @@ pterohost_workshop_sync() {
         fi
 
         remote_mtime="$(pterohost_workshop_remote_mtime "${id}")"
-        [ -n "${remote_mtime}" ] || continue
+
+        # Say so. An unanswerable update check looks exactly like "this mod is
+        # current", and that silence is what hid a permanently dead refresh path
+        # for as long as it existed. Still never fatal: a Steam outage must not
+        # keep a server with a working install down.
+        if [ -z "${remote_mtime}" ]; then
+            pterohost_log "Mod ${id}: could not read its Steam changelog - keeping the copy on disk, which may be out of date."
+            continue
+        fi
 
         local_mtime="$(stat -c %Y "/home/container/@${id}" 2>/dev/null || echo 0)"
         if [ "${remote_mtime}" -gt "${local_mtime}" ]; then

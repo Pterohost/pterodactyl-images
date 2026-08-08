@@ -28,14 +28,26 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
 # --- dedupe --------------------------------------------------------------
-check "dedupe sorts and drops duplicates" \
-    "@a;@b;" "$(pterohost_mods_dedupe '@b;@a;@b;')"
+# Order is the contract, not an accident. -mod= is evaluated left to right, so
+# re-ordering the list changes which mod wins - these three cases exist because
+# `sort -u` here silently rewrote every owner's load order.
+check "dedupe keeps first-seen order and drops duplicates" \
+    "@b;@a;" "$(pterohost_mods_dedupe '@b;@a;@b;')"
 
 check "dedupe on an empty list gives an empty list" \
     "" "$(pterohost_mods_dedupe '')"
 
-check "dedupe drops empty entries and whitespace" \
-    "@a;@b;" "$(pterohost_mods_dedupe ';@b; @a ;;')"
+check "dedupe drops empty entries and whitespace without reordering" \
+    "@b;@a;" "$(pterohost_mods_dedupe ';@b; @a ;;')"
+
+# The real shape this has to survive: a dependency-ordered Expansion stack whose
+# alphabetical order is wrong in three separate places.
+check "a dependency-ordered mod stack survives unchanged" \
+    "@CF;@DayZ-Expansion-Licensed;@DayZ-Expansion-Core;@DayZ-Expansion-AI;@VPPAdminTools;" \
+    "$(pterohost_mods_dedupe '@CF;@DayZ-Expansion-Licensed;@DayZ-Expansion-Core;@DayZ-Expansion-AI;@VPPAdminTools')"
+
+check "mixed case does not reorder either" \
+    "@zMod;@aMod;" "$(pterohost_mods_dedupe '@zMod;@aMod')"
 
 # --- launcher file -------------------------------------------------------
 cat > "${TMP}/modlist.html" <<'HTML'
@@ -50,6 +62,20 @@ HTML
 
 check "launcher export yields deduped ids" \
     "@1559212036;@2545327648;" "$(pterohost_mods_from_launcher "${TMP}/modlist.html")"
+
+# The launcher writes the rows in the order the player arranged them, so the
+# export IS the load order - reading it and then sorting discards the only thing
+# the file is good for. Descending ids so a sort would be visible.
+cat > "${TMP}/ordered.html" <<'HTML'
+<html><body><table>
+<tr><td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3000000000">last alphabetically, first in load order</a></td></tr>
+<tr><td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=2000000000">middle</a></td></tr>
+<tr><td><a href="https://steamcommunity.com/sharedfiles/filedetails/?id=1000000000">first alphabetically, last in load order</a></td></tr>
+</table></body></html>
+HTML
+
+check "launcher export preserves the player's order" \
+    "@3000000000;@2000000000;@1000000000;" "$(pterohost_mods_from_launcher "${TMP}/ordered.html")"
 
 pterohost_mods_from_launcher "${TMP}/nope.html" >/dev/null 2>&1
 check "missing launcher file reports failure" "1" "$?"
@@ -73,8 +99,8 @@ check "launcher file alone" \
     "@1559212036;@2545327648;" "$(pterohost_mods_client)"
 
 MODIFICATIONS="@1559212036;@Handmade" MOD_FILE="${TMP}/modlist.html"
-check "both sources merge and dedupe" \
-    "@1559212036;@2545327648;@Handmade;" "$(pterohost_mods_client)"
+check "both sources merge and dedupe, MODIFICATIONS first" \
+    "@1559212036;@Handmade;@2545327648;" "$(pterohost_mods_client)"
 
 # The regression that would silently poison the command line: warnings must not
 # end up inside the captured mod list.
