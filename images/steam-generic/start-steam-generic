@@ -12,6 +12,10 @@
 #                    INT для игр, которые сохраняют мир только по нему;
 #   GAME_LD_PATH     каталог с библиотеками игры относительно каталога сервера,
 #                    если бинарь не находит их сам (у Avorion это linux64);
+#   HEADLESS_DISPLAY единица, если серверу нужен виртуальный X-дисплей: часть
+#                    Unity-сборок не стартует без него даже в -batchmode;
+#   LOG_FILE         файл, в который игра пишет свой лог вместо stdout - его
+#                    содержимое транслируется в консоль панели;
 #   ADDITIONAL_ARGS  всё остальное, что владелец сервера хочет дописать.
 #
 # Чего этот образ намеренно НЕ делает: не правит конфигурации сложнее пары
@@ -30,6 +34,8 @@ PORT_STYLE="${PORT_STYLE:-dash}"
 PORT_FLAG="${PORT_FLAG:--port}"
 QUERY_PORT_FLAG="${QUERY_PORT_FLAG:-}"
 STOP_SIGNAL="${STOP_SIGNAL:-TERM}"
+HEADLESS_DISPLAY="${HEADLESS_DISPLAY:-0}"
+LOG_FILE="${LOG_FILE:-}"
 
 if [ -z "$APPID" ] || [ -z "$BINARY" ]; then
     pterohost_log "не заданы SRCDS_APPID и GAME_BINARY - egg настроен неверно"
@@ -80,11 +86,29 @@ if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
 fi
 
 pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
+
+# Часть Unity-серверов не поднимается без X-дисплея даже в -batchmode: движок
+# инициализирует графическую подсистему до того, как узнаёт, что рендерить
+# нечего. Дисплей стоит копейки (окно 1x1) и включается только по просьбе egg.
+if [ "$HEADLESS_DISPLAY" = "1" ]; then
+    PTEROHOST_ARGS=(xvfb-run -a -s "-screen 0 1x1x24 -ac -nolisten tcp -nolisten unix" "${PTEROHOST_ARGS[@]}")
+fi
+
+# Игра, которая пишет лог в файл, оставляет консоль панели пустой: владелец не
+# видит ни ошибок, ни строки готовности, а Wings по ней определяет, что сервер
+# запустился. Поэтому файл создаётся заранее и транслируется в консоль.
+if [ -n "$LOG_FILE" ]; then
+    : > "/home/container/${LOG_FILE}"
+    tail -n +1 -F "/home/container/${LOG_FILE}" &
+    PTEROHOST_LOG_TAIL=$!
+    trap 'kill "${PTEROHOST_LOG_TAIL}" 2>/dev/null' EXIT
+fi
+
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
 # Остановка: часть игр дописывает мир только по SIGINT и игнорирует SIGTERM от
 # Wings. Сигнал выбирается переменной, потому что универсального нет.
-if [ "$STOP_SIGNAL" = "TERM" ]; then
+if [ "$STOP_SIGNAL" = "TERM" ] && [ -z "$LOG_FILE" ]; then
     exec "${PTEROHOST_ARGS[@]}"
 fi
 
