@@ -25,9 +25,12 @@ USER root
 # headless-режиме, а Mono-игры - libgdiplus. xvfb нужен тем Unity-сборкам,
 # которые инициализируют графику до того, как узнают про -batchmode: без
 # дисплея они падают на старте. Включается переменной HEADLESS_DISPLAY.
+# xauth ставится вместе с ним не для красоты: xvfb-run без него отказывается
+# стартовать вообще («xauth command not found»), а зависимостью пакета xvfb он
+# не является.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        lib32gcc-s1 lib32stdc++6 libsdl2-2.0-0 libatomic1 libpulse0 xvfb \
+        lib32gcc-s1 lib32stdc++6 libsdl2-2.0-0 libatomic1 libpulse0 xvfb xauth \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
 
 COPY --chmod=755 images/steam-generic/start-steam-generic /usr/local/bin/start-steam-generic
