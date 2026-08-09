@@ -296,7 +296,19 @@ jobs:
 
   runtime:
     name: "${{ matrix.tag }}"
-    needs: test
+    # needs `build`, not just `test`, because one matrix entry - runtime_java_21
+    # - is FROM ghcr.io/pterohost/pterodactyl-images:java_21, which the `build`
+    # job publishes. On `needs: test` the two ran concurrently, so this job
+    # pulled whatever java_21 the PREVIOUS run had left in the registry: a fix
+    # to the Java line reached runtime_java_21 one build late, every time, and
+    # nothing failed to say so. Same class of bug the base/derived split above
+    # was created to prevent; it was applied to steamcmd_base and missed here.
+    #
+    # The ten pelican-based runtimes do not need `build` and now wait on it.
+    # That is the cheaper half of the trade: GitHub Actions has no
+    # per-matrix-entry `needs`, and splitting one entry into its own job means a
+    # second copy of the publish steps to keep in sync forever.
+    needs: [test, build]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:

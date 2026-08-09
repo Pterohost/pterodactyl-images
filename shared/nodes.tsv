@@ -1,11 +1,25 @@
 # Pterohost WG local network hostname map.
 # Format: <ip>\t<hostname>
 # Update this file and rebuild the images when a node is added or relocated.
+#
+# The authority for this list is the panel, not this file. Every IP a container
+# can see itself on is an allocation IP, so the list must equal:
+#
+#   SELECT DISTINCT a.ip, n.fqdn FROM allocations a JOIN nodes n ON n.id = a.node_id;
+#
+# When it does not, sysinfo.sh falls through to reverse DNS and then to the bare
+# container hostname, and the boot banner names the wrong machine - or no machine.
+# node03 and node04 were missing here from the day they were added, which is why
+# their containers could never name themselves.
 192.168.150.2	node09.pterohost.com
 192.168.151.2	node06.pterohost.com
 10.31.0.1	node06.pterohost.com
+10.31.0.5	node06.pterohost.com
 192.168.153.2	node10.pterohost.com
 192.168.157.2	node07.pterohost.com
 192.168.159.2	node08.pterohost.com
 192.168.160.2	node05.pterohost.com
 192.168.161.2	node11.pterohost.com
+45.11.18.95	node11.pterohost.com
+192.168.163.2	node04.pterohost.com
+192.168.164.2	node03.pterohost.com
