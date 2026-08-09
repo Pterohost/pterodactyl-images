@@ -103,6 +103,46 @@ runtime_install() {
     return 0
 }
 
+# Кандидаты в точку входа: имя по умолчанию плюс то, как файл называют на самом
+# деле. Клиент заливает свой проект целиком, и требовать от него именно index.js
+# незачем - если подходящий файл ровно один, запускаем его и говорим об этом.
+runtime_entry_candidates() {
+    case "$RUNTIME_KIND" in
+        node)   printf '%s\n' index.js main.js bot.js app.js server.js index.mjs index.cjs ;;
+        bun)    printf '%s\n' index.ts index.js main.ts bot.ts app.ts ;;
+        python) printf '%s\n' bot.py main.py run.py app.py __main__.py start.py ;;
+        java)   printf '%s\n' bot.jar server.jar app.jar ;;
+        dotnet) printf '%s\n' app.dll bot.dll ;;
+        dart)   printf '%s\n' bin/main.dart bin/bot.dart ;;
+        *)      ;;
+    esac
+}
+
+# Проект собирается целиком (go, rust, elixir) - отдельного файла точки входа у
+# него нет, и проверять его наличие нечего.
+runtime_entry_is_file() {
+    case "$RUNTIME_KIND" in
+        node|bun|python|java|dotnet|dart) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+runtime_present_candidates() {
+    while IFS= read -r name; do
+        [ -n "$name" ] && [ -f "$name" ] && printf '%s\n' "$name"
+    done < <(runtime_entry_candidates)
+}
+
+# Угадывать можно только тогда, когда угадывать нечего: подходящий файл ровно
+# один. Два кандидата - это выбор клиента, и молча взять первый значит запустить
+# не тот файл и обвинить в этом клиента.
+runtime_find_entry() {
+    local list count
+    list="$(runtime_present_candidates)"
+    count="$(printf '%s' "$list" | grep -c . || true)"
+    [ "$count" = "1" ] && printf '%s' "$list"
+}
+
 runtime_default_command() {
     local entry="$MAIN_FILE"
 
@@ -152,11 +192,71 @@ runtime_default_command() {
 }
 
 runtime_sync_repo
+# Сервер без проекта - это нормальное состояние только что купленной услуги:
+# клиент ещё не залил файлы. Раньше такой сервер уходил в бесконечный
+# перезапуск с трейсом рантайма («Cannot find module index.js»), из которого
+# владелец не мог понять ни что случилось, ни что делать. Теперь он получает
+# инструкцию в консоли и в файле, а сервер останавливается штатно.
+runtime_explain_empty() {
+    local entry="$1" others
+
+    others="$(runtime_present_candidates | tr '\n' ' ')"
+    if [ -n "${others// /}" ]; then
+        pterohost_log "не понятно, что запускать: подходящих файлов несколько - ${others}"
+        pterohost_log "укажите нужный в переменной MAIN_FILE - угадывать за вас мы не будем"
+    else
+        pterohost_log "запускать нечего: файла ${entry} в каталоге сервера нет"
+        pterohost_log "1. загрузите файлы проекта через файловый менеджер панели или по SFTP"
+    fi
+    pterohost_log "2. рантайм выбирается образом в настройках сервера - Node.js, Python, Java, Go и другие"
+    pterohost_log "3. имя файла запуска задаётся переменной MAIN_FILE, а произвольная команда - START_COMMAND"
+    pterohost_log "4. зависимости ставятся сами по manifest проекта (package.json, requirements.txt и т.п.)"
+
+    if [ -z "$(ls -A /home/container 2>/dev/null | grep -v '^\.pterohost$')" ]; then
+        cat > "/home/container/КАК-ЗАПУСТИТЬ.txt" << 'INSTRUCTIONS'
+Сервер готов, но проекта на нём ещё нет - его загружаете вы.
+
+1. Загрузите файлы через файловый менеджер панели или по SFTP.
+2. Выберите рантайм: в настройках сервера пункт «Образ» - Node.js, Bun, Python,
+   Java, .NET, Go, Rust, Elixir или Dart.
+3. Укажите файл запуска в переменной «Файл запуска» (MAIN_FILE), например
+   main.py или index.js. Если запуск сложнее - впишите команду целиком в
+   «Команда запуска» (START_COMMAND).
+4. Зависимости ставятся сами: положите package.json, requirements.txt,
+   go.mod, Cargo.toml или mix.exs. Отдельные пакеты можно перечислить в
+   переменной «Пакеты для установки» (INSTALL_PACKAGES).
+5. Можно не загружать файлы руками: укажите репозиторий в «Git-репозиторий»
+   (GIT_ADDRESS) и переустановите сервер - проект склонируется сам.
+
+Этот файл можно удалить.
+INSTRUCTIONS
+        pterohost_log "инструкция записана в КАК-ЗАПУСТИТЬ.txt"
+    fi
+}
+
 runtime_install
 
 pterohost_panel_argv "$@"
 if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
     command_line="$START_COMMAND"
+    if [ -z "$command_line" ] && runtime_entry_is_file; then
+        # Имя файла клиент мог не задать вовсе, а назвать его по-своему.
+        if [ -z "$MAIN_FILE" ]; then
+            detected="$(runtime_find_entry)"
+            if [ -n "$detected" ]; then
+                MAIN_FILE="$detected"
+                pterohost_log "точка входа найдена: ${MAIN_FILE}"
+            fi
+        fi
+
+        entry_file="${MAIN_FILE}"
+        [ -z "$entry_file" ] && entry_file="$(runtime_default_command | awk '{print $NF}')"
+        if [ ! -f "$entry_file" ]; then
+            runtime_explain_empty "$entry_file"
+            exit 0
+        fi
+    fi
+
     [ -z "$command_line" ] && command_line="$(runtime_default_command)"
     if [ -z "$command_line" ]; then
         pterohost_log "не задан ни START_COMMAND, ни точка входа - запускать нечего"
