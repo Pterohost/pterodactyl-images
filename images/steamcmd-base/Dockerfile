@@ -78,6 +78,7 @@ COPY --chmod=755 shared/steam-update.sh /usr/local/lib/pterohost/steam-update.sh
 COPY --chmod=755 shared/launch.sh /usr/local/lib/pterohost/launch.sh
 COPY --chmod=755 shared/kvconf.sh /usr/local/lib/pterohost/kvconf.sh
 COPY --chmod=755 shared/cfgconf.sh /usr/local/lib/pterohost/cfgconf.sh
+COPY --chmod=755 shared/jsonconf.sh /usr/local/lib/pterohost/jsonconf.sh
 COPY --chmod=755 shared/workshop.sh /usr/local/lib/pterohost/workshop.sh
 COPY --chmod=755 shared/unrealini.sh /usr/local/lib/pterohost/unrealini.sh
 COPY --chmod=644 shared/unrealini.awk /usr/local/lib/pterohost/unrealini.awk

@@ -14,6 +14,7 @@ cd /home/container || exit 1
 
 . /usr/local/lib/pterohost/steam-update.sh
 . /usr/local/lib/pterohost/launch.sh
+. /usr/local/lib/pterohost/jsonconf.sh
 
 APPID="${SRCDS_APPID:-739590}"
 CONFIG_DIR="/home/container/Configs"
@@ -22,58 +23,52 @@ NETWORK="${CONFIG_DIR}/Network.eco"
 pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "/home/container/EcoServer" || true
 chmod +x /home/container/EcoServer 2>/dev/null
 
-# Configs/*.eco - обычный JSON. Правим только строку со скалярным значением,
-# чтобы не задеть вложенные объекты.
+# Ключ, значение которого задаёт панель. Пустая переменная означает сервер,
+# созданный до появления этой настройки: там значение остаётся за владельцем.
 eco_set() {
-    local file="$1" key="$2" value="$3" json
-    [ -z "$value" ] && return 0
-    [ -f "$file" ] || return 0
+    [ -n "$2" ] || return 0
+    json_set "$NETWORK" "$1" "$2"
+}
 
-    case "$value" in
-        ''|*[!0-9]*)
-            case "$value" in
-                true|false) json="$value" ;;
-                *) json="\"$(printf '%s' "$value" | sed 's/"/\\"/g')\"" ;;
-            esac
-            ;;
-        *) json="$value" ;;
-    esac
-
-    if grep -qE "^[[:space:]]*\"${key}\"[[:space:]]*:" "$file"; then
-        sed -i -E "s|^([[:space:]]*\"${key}\"[[:space:]]*:[[:space:]]*)(\"[^\"]*\"|[0-9]+|true|false)([[:space:]]*,?)[[:space:]]*$|\\1${json}\\3|" "$file"
-    fi
+# То же для ключей строкового типа.
+eco_set_string() {
+    [ -n "$2" ] || return 0
+    json_set "$NETWORK" "$1" "$(json_string "$2")"
 }
 
 eco_config() {
     mkdir -p "$CONFIG_DIR" "${DOTNET_BUNDLE_EXTRACT_BASE_DIR:-/home/container/.dotnet_bundle}"
 
-    if [ ! -f "$NETWORK" ]; then
-        pterohost_log "создаю Configs/Network.eco"
-        cat > "$NETWORK" <<JSON
-{
-  "Description": "Pterohost Eco",
-  "DiscordAddress": "",
-  "GameServerPort": ${SERVER_PORT:-3000},
-  "IPAddress": "Any",
-  "MaxConnections": ${MAX_PLAYERS:-30},
-  "Name": "${SERVER_NAME:-Pterohost Eco}",
-  "Password": "${SERVER_PASSWORD:-}",
-  "PublicServer": ${PUBLIC_SERVER:-true},
-  "RemoteAddress": "",
-  "WebServerPort": ${WEB_PORT:-3001}
-}
-JSON
+    # На первом запуске сервер ещё не развернул Configs/*.eco: рядом лежат
+    # только шаблоны из депота. Берём шаблон - так набор ключей совпадает с тем,
+    # что ждёт текущая версия игры, и наш файл не расходится с ней.
+    if [ ! -f "$NETWORK" ] && [ -f "${NETWORK}.template" ]; then
+        pterohost_log "создаю Configs/Network.eco из шаблона сервера"
+        cp "${NETWORK}.template" "$NETWORK"
     fi
+    [ -f "$NETWORK" ] || return 0
 
-    # Порт всегда берём из аллокации: сервер, слушающий не тот порт, для игроков
-    # просто не существует.
-    eco_set "$NETWORK" GameServerPort "${SERVER_PORT:-3000}"
-    eco_set "$NETWORK" WebServerPort "${WEB_PORT:-}"
-    eco_set "$NETWORK" Name "${SERVER_NAME:-}"
-    eco_set "$NETWORK" Description "${SERVER_DESC:-}"
-    eco_set "$NETWORK" MaxConnections "${MAX_PLAYERS:-}"
-    eco_set "$NETWORK" Password "${SERVER_PASSWORD:-}"
-    eco_set "$NETWORK" PublicServer "${PUBLIC_SERVER:-}"
+    eco_set GameServerPort "${SERVER_PORT:-}"
+    eco_set WebServerPort "${WEB_PORT:-}"
+    eco_set RconServerPort "${RCON_PORT:-}"
+    eco_set SteamServerPort "${STEAM_PORT:-}"
+    eco_set_string Name "${SERVER_NAME:-}"
+    eco_set PublicServer "${PUBLIC_SERVER:-}"
+
+    # Слоты: в Eco 11 MaxConnections переименован в DefaultSlots. ReservedSlots
+    # не добавляет мест, а откусывает их от лимита под игроков с приоритетом,
+    # поэтому дефолтные 5 на тарифе с 4 слотами закрыли бы вход вообще всем.
+    eco_set DefaultSlots "${MAX_PLAYERS:-}"
+    eco_set ReservedSlots "${RESERVED_SLOTS:-}"
+
+    # Пароль и описание обязаны уметь обнуляться: очистил поле в панели -
+    # значит хочет сервер без пароля, а не старое значение навсегда.
+    json_set "$NETWORK" Password "$(json_string "${SERVER_PASSWORD:-}")"
+    json_set "$NETWORK" DetailedDescription "$(json_string "${SERVER_DESC:-}")"
+
+    # Порты уже выданы аллокацией, а контейнер работает в host-сети: пробивать
+    # их ещё и через UPnP нечем и незачем.
+    json_set "$NETWORK" UPnPEnabled false
 }
 
 eco_config
@@ -87,11 +82,15 @@ fi
 # вовсе, а падает с «Authentication to Strange Cloud failed». Учётные данные -
 # владельца сервера, как ключ BeamMP или токен Factorio. Если их нет, поднимаем
 # сервер в офлайн-режиме и говорим об этом прямо, а не падаем молча.
+#
+# Значение крепится к флагу через "=": разбор аргументов у Eco другой формы не
+# понимает и отвечает «Argument 'username' has to be passed with a value using
+# the following format: -username="value"», после чего сервер падает.
 if [ -n "${ECO_TOKEN:-}" ]; then
-    pterohost_append_if_absent -userToken -userToken "${ECO_TOKEN}"
+    pterohost_append_if_absent -userToken "-userToken=${ECO_TOKEN}"
 elif [ -n "${ECO_USER:-}" ] && [ -n "${ECO_PASSWORD:-}" ]; then
-    pterohost_append_if_absent -username -username "${ECO_USER}"
-    pterohost_append_if_absent -password -password "${ECO_PASSWORD}"
+    pterohost_append_if_absent -username "-username=${ECO_USER}"
+    pterohost_append_if_absent -password "-password=${ECO_PASSWORD}"
 else
     pterohost_log "нет учётных данных Eco - сервер поднимается в офлайн-режиме и не попадёт в общий список"
     pterohost_append_if_absent -offline -offline
