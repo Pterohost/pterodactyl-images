@@ -50,7 +50,10 @@ json_set() {
             indent = ""
             if (match($0, /^[[:space:]]+/)) indent = substr($0, 1, RLENGTH)
             comma = ($0 ~ /,[[:space:]]*$/) ? "," : ""
-            print indent "\"" key "\": " json comma
+            # Eco writes CRLF; a rewritten line has to keep the ending its
+            # neighbours have rather than leave the file mixed.
+            cr = ($0 ~ /\r$/) ? "\r" : ""
+            print indent "\"" key "\": " json comma cr
             replaced = 1
             next
         }

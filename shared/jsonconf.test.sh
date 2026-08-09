@@ -95,6 +95,15 @@ json_set "${FILE}" Name "$(json_string 'outer')"
 check "nested key of the same name untouched" \
     '    "Name": "nested"' "$(grep -m1 -E '^    "Name"' "${FILE}")"
 
+# --- line endings ---------------------------------------------------------
+fixture
+sed -i 's/$/\r/' "${FILE}"
+json_set "${FILE}" GameServerPort 22729
+check "CRLF file keeps CRLF on the rewritten line" "1" \
+    "$(grep -c $'": 22729,\r$' "${FILE}")"
+check "CRLF file gets no LF-only lines" "0" \
+    "$(grep -cv $'\r$' "${FILE}")"
+
 fixture
 before="$(cat "${FILE}")"
 json_set "${FILE}" GameServerPort 22729
