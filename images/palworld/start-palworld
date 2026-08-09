@@ -29,6 +29,15 @@
 #      c. a sed whose delimiter collided with its own alternation, so no
 #         existing key was ever updated. The tuple writer replaced it.
 #
+#    The flip side of fixing those: every key in shared/palworld-keys.tsv is
+#    now rewritten from the panel on every boot, so an owner who edits one of
+#    them in the file by hand loses it at the next start - which reads as "the
+#    file gets overwritten" and was a recurring complaint. PAL_MANAGE_SETTINGS=0
+#    hands the file back: only the ports and the RCON/REST switches are written,
+#    because those follow the panel's allocations and cannot be owner-owned.
+#    Everything else is then read from the ini exactly as left, and the matching
+#    fields in the panel stop having any effect. Default stays 1.
+#
 # 2. STOPPING. Palworld does not read stdin, so the egg's stop command has to
 #    arrive as a signal and the shutdown itself has to go over RCON. The old egg
 #    had a stdin->RCON bridge and the first version of this image dropped it,
@@ -207,7 +216,7 @@ if [ "${PAL_KEEP_WORLD_OPTION:-0}" != "1" ] && [ -d "${SAVE_DIR}" ]; then
     find "${SAVE_DIR}" -maxdepth 2 -name 'WorldOption.sav' 2>/dev/null | while IFS= read -r world_option; do
         [ -n "${world_option}" ] || continue
         if mv -f "${world_option}" "${world_option}.pterohost-disabled" 2>/dev/null; then
-            log "WorldOption.sav in the save was overriding every panel setting - including the admin/RCON password - and has been moved aside. Settings now come from the panel; set PAL_KEEP_WORLD_OPTION=1 to keep the world's own copy instead."
+            log "WorldOption.sav in the save was overriding every setting in PalWorldSettings.ini - including the admin/RCON password - and has been moved aside. The ini is the source of truth again; set PAL_KEEP_WORLD_OPTION=1 to keep the world's own copy instead."
         fi
     done
 fi
@@ -225,7 +234,9 @@ apply_settings() {
 
     unreal_begin
 
-    if [ -f "${PAL_KEYS}" ]; then
+    if [ "${PAL_MANAGE_SETTINGS:-1}" != "1" ]; then
+        log "PAL_MANAGE_SETTINGS=0 - PalWorldSettings.ini belongs to you. Only the ports and RCON/REST are written; every gameplay setting is read from the file as you left it, and the matching fields in the panel do nothing until you set this back to 1."
+    elif [ -f "${PAL_KEYS}" ]; then
         while IFS=$'\t' read -r env_name key type; do
             case "${env_name}" in ''|\#*) continue ;; esac
             [ -n "${key}" ] || continue
@@ -276,10 +287,13 @@ apply_settings() {
 
     kv_backup_once "${PAL_INI}" settings
 
+    local owner="the panel"
+    [ "${PAL_MANAGE_SETTINGS:-1}" = "1" ] || owner="the panel (ports and RCON/REST only)"
+
     unreal_apply "${PAL_INI}"
     case $? in
-        0) log "Server settings written from the panel." ;;
-        1) log "Server settings already match the panel." ;;
+        0) log "Server settings written from ${owner}." ;;
+        1) log "Server settings already match ${owner}." ;;
         *) log "WARN: could not write PalWorldSettings.ini - the server keeps its current settings." ;;
     esac
 }
