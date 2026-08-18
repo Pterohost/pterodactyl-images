@@ -76,6 +76,28 @@ beammp_install() {
     touch "/home/container/.beammp-${BEAMMP_VERSION}-${suffix}"
 }
 
+# Адрес прослушивания. Только «::» - рабочее значение на Linux.
+#
+# BeamMP 3.9.x в TNetwork::Authentication() безусловно делает
+# SockAddr.address().to_v6(): он рассчитывает, что сокет двухстековый и клиент
+# приходит как IPv4-mapped IPv6. При IP = "0.0.0.0" сокет чисто IPv4, каст
+# бросает boost bad_address_cast, соединение рвётся, и клиент видит «код ошибки
+# 3». Снаружи это выглядит здоровым сервером: он в списке, в логе «ALL SYSTEMS
+# STARTED SUCCESSFULLY», а в игру не пускает никого.
+beammp_bind_ip() {
+    local want="${BEAMMP_BIND_IP:-::}"
+
+    # Без модуля IPv6 в ядре открыть AF_INET6 нельзя, и сервер не стартует
+    # вообще. Тогда лучше живой IPv4-сокет и явная строка в логе.
+    if [ "$want" = "::" ] && [ ! -e /proc/net/if_inet6 ]; then
+        pterohost_log "в ядре нет IPv6: слушаю 0.0.0.0, но клиенты BeamMP 3.9+ подключиться не смогут"
+        printf '0.0.0.0'
+        return 0
+    fi
+
+    printf '%s' "$want"
+}
+
 # Значение для TOML: числа и true/false идут как есть, остальное в кавычках.
 beammp_toml_value() {
     case "$1" in
@@ -121,7 +143,7 @@ Debug = false
 Tags = "Freeroam"
 # Ключи ниже сервер ждёт всегда: без них он на каждом старте пишет
 # «Value ... has unexpected type» и берёт своё умолчание.
-IP = "0.0.0.0"
+IP = "::"
 AllowGuests = true
 InformationPacket = true
 
@@ -136,6 +158,9 @@ TOML
     # Порт всегда берём из аллокации: сервер, слушающий не тот порт, недоступен
     # игрокам, а панель всё равно показывает выданный.
     beammp_set Port "${SERVER_PORT:-30814}"
+    # Адрес синхронизируем всегда: конфиги, созданные прежними версиями образа,
+    # несут сломанный 0.0.0.0 и чинятся только так.
+    beammp_set IP "$(beammp_bind_ip)"
     beammp_set AuthKey "${AUTH_KEY:-}"
     beammp_set Name "${SERVER_NAME:-}"
     beammp_set MaxPlayers "${MAX_PLAYERS:-}"
