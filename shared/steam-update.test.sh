@@ -234,5 +234,54 @@ pterohost_steam_update 380870 experimental 0 "${SENTINEL}" >/dev/null 2>&1
 check "без пароля лишнего флага в команде нет" "0" \
     "$(grep -c -- '-betapassword' "${FAKE_CALLS}")"
 
+# --- validate against a forced platform ----------------------------------
+# App 222860 (Left 4 Dead 2) installs only from its Windows depot, and SteamCMD
+# refuses to validate a depot for an OS it is not running on. The retry has to
+# drop the flag rather than burn all three attempts on it.
+reset_case
+cat > "${STEAMCMD_RUN}/steamcmd.sh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${FAKE_CALLS}"
+case "$*" in
+    *app_update*) ;;
+    *) exit 0 ;;
+esac
+case "$*" in
+    *validate*)
+        printf "ERROR! Failed to install app '222860' (Missing configuration)\n"
+        exit 1
+        ;;
+esac
+printf "Success! App '222860' fully installed.\n"
+: > "${FAKE_SENTINEL}"
+exit 0
+STUB
+chmod +x "${STEAMCMD_RUN}/steamcmd.sh"
+STEAMCMD_PLATFORM=windows pterohost_steam_update 222860 "" 1 "${SENTINEL}" >/dev/null 2>&1
+check "принудительная платформа: validate снимается и установка идёт" "0" "$?"
+check "первая попытка всё же пробует validate" "1" \
+    "$(grep -c -- 'app_update 222860 validate' "${FAKE_CALLS}")"
+check "повтор уходит без validate" "1" \
+    "$(grep -c -- 'app_update 222860 +quit' "${FAKE_CALLS}")"
+
+reset_case
+export FAKE_DOWNLOADS=0 FAKE_EXIT=1
+export FAKE_OUTPUT="ERROR! Failed to install app '380870' (Missing configuration)"
+cat > "${STEAMCMD_RUN}/steamcmd.sh" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "${FAKE_CALLS}"
+case "$*" in
+    *app_update*) ;;
+    *) exit 0 ;;
+esac
+printf '%s\n' "${FAKE_OUTPUT}"
+exit 1
+STUB
+chmod +x "${STEAMCMD_RUN}/steamcmd.sh"
+unset STEAMCMD_PLATFORM
+pterohost_steam_update 380870 "" 1 "${SENTINEL}" >/dev/null 2>&1
+check "без принудительной платформы validate не снимается" "0" \
+    "$(grep -c -- 'app_update 380870 +quit' "${FAKE_CALLS}")"
+
 printf '\n%s passed, %s failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]
