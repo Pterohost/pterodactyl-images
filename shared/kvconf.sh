@@ -37,6 +37,49 @@ kv_get() {
     grep -E "^[[:space:]]*${key}[[:space:]]*=" "${file}" | head -1 | cut -d= -f2-
 }
 
+# kv_set_owned <file> <key> <panel value> [seed]
+#   Three-way ownership for a key the server owner can also edit themselves -
+#   a server name, a description, a welcome message.
+#
+#   Panel value set    -> the panel wins, on every boot. That is what an egg
+#                         variable is for: type it in the panel, restart, done.
+#   Panel value empty  -> the FILE wins. The key is seeded from <seed> only
+#                         while it is still empty, and is never touched again -
+#                         so an edit made over SFTP, or an in-game console
+#                         command, survives the next restart.
+#
+#   The second half is the half that keeps getting left out, and it is the half
+#   customers notice. Writing a display name unconditionally from an egg
+#   variable on every boot means the owner cannot change it by any route at all
+#   when that variable is also an identifier and therefore validated down to
+#   letters and digits: they cannot type brackets or Cyrillic into the panel,
+#   and whatever they write into the config lasts exactly until the next
+#   restart. Project Zomboid service 7657 spent a day advertising itself as
+#   "MEATBALLS" that way while its owner asked, repeatedly, for
+#   "[RU] MEATBALLS [PVE] [VANILLA+] 24/7".
+#
+#   CR and LF are stripped rather than escaped. These files are one key per
+#   line, so a pasted multi-line description does not look wrong - it silently
+#   turns the rest of the value into keys the game then fails to parse.
+kv_set_owned() {
+    local file="$1" key="$2" panel_value="$3" seed="${4:-}"
+
+    [ -f "${file}" ] || return 1
+
+    panel_value="$(printf '%s' "${panel_value}" | tr -d '\r\n')"
+
+    if [ -n "${panel_value}" ]; then
+        kv_set "${file}" "${key}" "${panel_value}"
+        return
+    fi
+
+    if [ -z "$(kv_get "${file}" "${key}")" ] && [ -n "${seed}" ]; then
+        kv_set "${file}" "${key}" "$(printf '%s' "${seed}" | tr -d '\r\n')"
+    fi
+
+    return 0
+}
+
 # kv_backup_once <file> <tag>
 #   Keep one pristine copy from before we ever touched the file, so an operator
 #   can always see what the game itself wrote.

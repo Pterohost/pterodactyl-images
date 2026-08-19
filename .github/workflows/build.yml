@@ -56,6 +56,9 @@ jobs:
       - name: shared/jsonconf.test.sh
         run: bash shared/jsonconf.test.sh
 
+      - name: shared/kvconf.test.sh
+        run: bash shared/kvconf.test.sh
+
   # steamcmd_base builds on its own rather than as one leg of the big matrix.
   # The nine game images are FROM it, so they used to wait on `needs: build` -
   # the whole 19-tag matrix, java_26_ea and a Docker Hub timeout included. One

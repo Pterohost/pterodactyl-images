@@ -29,6 +29,16 @@
 #    console was write-only, and every stop ran to the Wings timeout and ended
 #    in SIGKILL with the world unsaved.
 #
+# 4. THE NAME PLAYERS SEE. -servername picks the config file and the save
+#    folder, so it has to stay filename-safe and the egg validates it as
+#    alpha_num. PublicName - the name in the in-game and Steam server browsers -
+#    is a different key entirely, and this script used to overwrite it from
+#    SERVER_NAME on every boot. The owner could therefore neither type their
+#    real name in the panel nor keep one set by hand: an ini edit or an in-game
+#    `changeoption PublicName` lasted until the next restart. SERVER_PUBLIC_NAME
+#    and SERVER_DESCRIPTION now own those two keys, and when they are empty the
+#    file is left alone rather than reset.
+#
 # Every step is non-fatal: a Steam or Workshop hiccup logs a warning and boots
 # with the files already on disk.
 
@@ -227,7 +237,7 @@ fi
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
 # ---------------------------------------------------------------------------
-# 3. Server ini: ports and RCON must agree with the panel's allocations.
+# 3. Server ini: ports, RCON and the public name must agree with the panel.
 # ---------------------------------------------------------------------------
 INI="${ZOMBOID_DIR}/Server/${SERVER_NAME}.ini"
 mkdir -p "${ZOMBOID_DIR}/Server"
@@ -243,14 +253,29 @@ kv_backup_once "${INI}" ports
 
 kv_set "${INI}" DefaultPort "${SERVER_PORT}"
 [ -n "${STEAM_PORT:-}" ] && kv_set "${INI}" UDPPort "${STEAM_PORT}"
-kv_set "${INI}" PublicName "${SERVER_NAME}"
 [ -n "${MAX_PLAYERS:-}" ] && kv_set "${INI}" MaxPlayers "${MAX_PLAYERS}"
 
-# RCON is what gives the panel a player list. Only enable it when the egg
-# actually allocated a port and set a password - never invent one, and never
-# leave RCON listening with an empty password.
+# The name and the blurb in the in-game and Steam server browsers. SERVER_NAME
+# is the fallback only, and only on a fresh install, so an existing server keeps
+# whatever it is already advertising.
+kv_set_owned "${INI}" PublicName "${SERVER_PUBLIC_NAME:-}" "${SERVER_NAME}"
+kv_set_owned "${INI}" PublicDescription "${SERVER_DESCRIPTION:-}"
+
+if [ -n "${SERVER_PUBLIC_NAME:-}" ]; then
+    log "Public name: ${SERVER_PUBLIC_NAME}"
+else
+    log "Public name left to the server config ($(kv_get "${INI}" PublicName)); set it in the panel to manage it from there."
+fi
+
+# RCON is what gives the panel a player list. The port follows the allocation
+# unconditionally - Zomboid opens the socket only once a password exists (with
+# RCONPassword empty it does not listen at all, verified on the fleet), so
+# writing the port on its own cannot expose anything, and it means the moment a
+# password is set the server is already on the port the panel handed out rather
+# than on the vendor default 27015.
+[ -n "${RCON_PORT:-}" ] && kv_set "${INI}" RCONPort "${RCON_PORT}"
+
 if [ -n "${RCON_PORT:-}" ] && [ -n "${RCON_PASSWORD:-}" ]; then
-    kv_set "${INI}" RCONPort "${RCON_PORT}"
     kv_set "${INI}" RCONPassword "${RCON_PASSWORD}"
     log "RCON enabled on port ${RCON_PORT}."
 else
