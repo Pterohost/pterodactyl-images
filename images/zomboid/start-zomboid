@@ -39,6 +39,14 @@
 #    and SERVER_DESCRIPTION now own those two keys, and when they are empty the
 #    file is left alone rather than reset.
 #
+# 5. MOD ANIMATIONS ON A CASE-SENSITIVE FILESYSTEM. Build 42 finds an AnimSet
+#    by its real name on disk but resolves the files it references through a
+#    path it has lowercased end to end, so mods that ship media/AnimSets fail
+#    to parse on Linux and only on Linux. The states they define are then never
+#    registered and players get stuck animations and cancelled interactions,
+#    with nothing in the log that names a mod. We mirror the names the loader
+#    asks for, narrowly and repeatedly - full reasoning in section 4.
+#
 # Every step is non-fatal: a Steam or Workshop hiccup logs a warning and boots
 # with the files already on disk.
 
@@ -286,7 +294,202 @@ fi
 [ -n "${SERVER_PASSWORD:-}" ] && kv_set "${INI}" Password "${SERVER_PASSWORD}"
 
 # ---------------------------------------------------------------------------
-# 4. Launch, forwarding console input and turning SIGTERM into a clean save.
+# 4. Workshop mods: make the lowercased paths the animation loader asks for
+#    actually resolve on a case-sensitive filesystem.
+# ---------------------------------------------------------------------------
+#
+# Build 42 loads a mod's animation states by walking media/AnimSets on disk with
+# the name as the author wrote it, and then resolving every reference INSIDE
+# those files through a path it has lowercased end to end. So a perfectly normal
+# mod breaks on Linux and only on Linux:
+#
+#   Sapph_CookingWok.xml says   <animNode x_extends='looped.xml'>
+#   the engine then opens       .../mods/sapphcookingb42/42.20.0/media/animsets/player/actions/looped.xml
+#   the disk actually holds     .../mods/SapphCookingB42/42.20.0/media/AnimSets/player/actions/looped.xml
+#
+#   PZXmlParserException ... Caused by: java.io.FileNotFoundException
+#     at zombie.core.skinnedmodel.advancedanimation.AnimNode.Parse(AnimNode.java:225)
+#
+# The AnimSet then does not parse, so its states are never registered. What the
+# owner sees is not a stack trace - it is players stuck in animations and
+# interactions that cancel themselves, because the server's action state machine
+# is missing states the (Windows, case-insensitive) clients have. Measured on
+# service 7474: 96 AnimSets from Lifestyle: Hobbies and Sapph's Cooking failed
+# to parse, and the count went to zero once the lowercase paths existed.
+#
+# So mirror the names, and mirror them narrowly. Symlinks, not renames: the
+# walker still opens the mixed-case spelling, so both have to work at once.
+# Scope is the four media subtrees the engine opens by literal path, plus the
+# mod and version directories above them, because the lowercased path the
+# engine builds includes those components too. Deliberately NOT media/lua,
+# media/ui, media/textures or media/maps: the mod file map is lowercased by the
+# engine already (verified - a lua file present under four spellings on disk
+# still logs exactly one "overrides" line), so links there buy nothing while
+# making the server's tree differ from every client's, which is a bad trade with
+# DoLuaChecksum on.
+#
+# Timing is the other half. The game downloads Workshop items itself, during its
+# own startup, and only reads AnimSets about eighty seconds in - so a single
+# pass before launch covers the mods already on disk and misses anything Steam
+# rewrites during boot. Worse, an update REPLACES the directory and takes the
+# links with it, which is how this silently regresses one restart later. Hence
+# the watcher: re-mirror whenever the Workshop tree changes, for a bounded
+# window, and prune the dangling links an update leaves behind.
+
+ZOMBOID_WORKSHOP_APPID="${ZOMBOID_WORKSHOP_APPID:-108600}"
+ZOMBOID_WORKSHOP_DIR="/home/container/steamapps/workshop/content/${ZOMBOID_WORKSHOP_APPID}"
+ZOMBOID_CASE_MIRROR="${ZOMBOID_CASE_MIRROR:-1}"
+ZOMBOID_CASE_MIRROR_WINDOW="${ZOMBOID_CASE_MIRROR_WINDOW:-600}"
+
+# zomboid_case_roots
+#   The directories worth mirroring: media/AnimSets, media/actiongroups,
+#   media/anims_* and media/models_*, wherever a mod keeps its media - the
+#   legacy layout (mods/<Mod>/media) and both Build 42 ones
+#   (mods/<Mod>/common/media, mods/<Mod>/<version>/media).
+#
+#   -type d is load-bearing: it does not match symlinks, so a lowercase alias
+#   created by an earlier pass is never mistaken for a second real directory.
+zomboid_case_roots() {
+    [ -d "${ZOMBOID_WORKSHOP_DIR}" ] || return 0
+
+    find "${ZOMBOID_WORKSHOP_DIR}" -mindepth 3 -maxdepth 5 -type d -name media 2>/dev/null \
+    | while IFS= read -r media; do
+        find "${media}" -mindepth 1 -maxdepth 1 -type d \
+            \( -iname 'AnimSets' -o -iname 'actiongroups' \
+               -o -iname 'anims_*' -o -iname 'models_*' \) 2>/dev/null
+    done
+}
+
+# zomboid_alias_lower <path>
+#   Give <path> an all-lowercase sibling pointing at it. Relative target, so the
+#   link survives the volume being moved between nodes. Succeeds only when it
+#   actually created something, which is what the counters below count.
+zomboid_alias_lower() {
+    local path="$1"
+    local dir name lower
+
+    dir="$(dirname -- "${path}")"
+    name="$(basename -- "${path}")"
+    lower="$(printf '%s' "${name}" | tr '[:upper:]' '[:lower:]')"
+
+    [ "${name}" = "${lower}" ] && return 1
+    { [ -e "${dir}/${lower}" ] || [ -L "${dir}/${lower}" ]; } && return 1
+
+    ln -s -- "${name}" "${dir}/${lower}" 2>/dev/null
+}
+
+# zomboid_alias_canonical <path>
+#   The mirror above only ever adds lowercase names, which is all the loader
+#   needs. The directory WALK is the other direction: it opens media/AnimSets
+#   with that exact spelling, so a mod that shipped its folder as media/animsets
+#   is never walked at all and its states are missing for a completely different
+#   reason. Cheap to cover, and only for the three names where the engine's
+#   spelling is not already lowercase.
+zomboid_alias_canonical() {
+    local path="$1"
+    local dir name canon
+
+    dir="$(dirname -- "${path}")"
+    name="$(basename -- "${path}")"
+
+    case "${name}" in
+        animsets) canon="AnimSets" ;;
+        anims_x)  canon="anims_X" ;;
+        models_x) canon="models_X" ;;
+        *)        return 1 ;;
+    esac
+
+    { [ -e "${dir}/${canon}" ] || [ -L "${dir}/${canon}" ]; } && return 1
+
+    ln -s -- "${name}" "${dir}/${canon}" 2>/dev/null
+}
+
+# zomboid_mirror_case
+#   One idempotent pass. Cheap enough to run repeatedly: it only walks the four
+#   subtrees above, not the whole mod.
+zomboid_mirror_case() {
+    [ "${ZOMBOID_CASE_MIRROR}" = "1" ] || return 0
+    [ -d "${ZOMBOID_WORKSHOP_DIR}" ] || return 0
+
+    local created=0 pruned=0
+    local root stale entry media modver mod ancestor
+
+    while IFS= read -r root; do
+        [ -n "${root}" ] || continue
+
+        # A Workshop update replaces the directory under the links, so clear
+        # what no longer points anywhere before adding more.
+        while IFS= read -r stale; do
+            [ -n "${stale}" ] || continue
+            rm -f -- "${stale}" && pruned=$((pruned + 1))
+        done < <(find "${root}" -xtype l 2>/dev/null)
+
+        media="$(dirname -- "${root}")"
+        modver="$(dirname -- "${media}")"
+        mod="$(dirname -- "${modver}")"
+
+        # The lowercased path the engine builds covers every component, so the
+        # mod directory (and the version directory, when a mod capitalises it)
+        # need aliases too. "mods" itself never does - skip it so the legacy
+        # layout does not walk one level too far up.
+        for ancestor in "${modver}" "${mod}"; do
+            case "${ancestor}" in
+                */mods) continue ;;
+            esac
+            zomboid_alias_lower "${ancestor}" && created=$((created + 1))
+        done
+
+        zomboid_alias_lower "${root}" && created=$((created + 1))
+        zomboid_alias_canonical "${root}" && created=$((created + 1))
+
+        while IFS= read -r entry; do
+            [ -n "${entry}" ] || continue
+            zomboid_alias_lower "${entry}" && created=$((created + 1))
+        done < <(find "${root}" -depth -name '*[A-Z]*' -not -type l 2>/dev/null)
+    done < <(zomboid_case_roots)
+
+    printf '%s %s' "${created}" "${pruned}"
+}
+
+# zomboid_workshop_signature
+#   Cheap "did Steam touch anything" probe - the ids and their mod directories,
+#   with mtimes. A download or an update moves one of them.
+zomboid_workshop_signature() {
+    find "${ZOMBOID_WORKSHOP_DIR}" -maxdepth 3 -printf '%p %T@\n' 2>/dev/null | cksum
+}
+
+# zomboid_case_watch
+#   Re-mirror while the game is still pulling Workshop items. Bounded, and the
+#   launcher kills it once the server process is gone.
+zomboid_case_watch() {
+    local deadline=$(( SECONDS + ZOMBOID_CASE_MIRROR_WINDOW ))
+    local last sig counts
+
+    last="$(zomboid_workshop_signature)"
+
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        sleep 10
+        sig="$(zomboid_workshop_signature)"
+        [ "${sig}" = "${last}" ] && continue
+        last="${sig}"
+
+        counts="$(zomboid_mirror_case)"
+        case "${counts}" in
+            "0 0"|"") ;;
+            *) log "Workshop changed - case mirror: ${counts% *} link(s) added, ${counts#* } stale removed." ;;
+        esac
+    done
+}
+
+if [ "${ZOMBOID_CASE_MIRROR}" = "1" ]; then
+    CASE_COUNTS="$(zomboid_mirror_case)"
+    log "Animation path case mirror: ${CASE_COUNTS% *} link(s) added, ${CASE_COUNTS#* } stale removed."
+else
+    log "ZOMBOID_CASE_MIRROR=0 - mod animation paths left as-is (mixed-case AnimSets will not load on Linux)."
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Launch, forwarding console input and turning SIGTERM into a clean save.
 # ---------------------------------------------------------------------------
 export PATH="./jre64/bin:${PATH}"
 export LD_LIBRARY_PATH="./linux64:./natives:.:./jre64/lib/amd64:${LD_LIBRARY_PATH:-}"
@@ -385,9 +588,19 @@ forward_console() {
 forward_console &
 FORWARDER=$!
 
+# The game downloads its Workshop items after this point, so the pre-launch
+# mirror pass cannot have seen them. Keep re-mirroring until the tree stops
+# moving or the window closes - see section 4.
+WATCHER=""
+if [ "${ZOMBOID_CASE_MIRROR}" = "1" ]; then
+    zomboid_case_watch &
+    WATCHER=$!
+fi
+
 wait "${CHILD}"
 STATUS=$?
 
+[ -n "${WATCHER}" ] && kill "${WATCHER}" 2>/dev/null
 kill "${FORWARDER}" 2>/dev/null || true
 exec 3>&-
 exec 4<&-
