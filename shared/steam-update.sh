@@ -150,6 +150,26 @@ pterohost_steam_update() {
             break
         fi
 
+        # `validate` and a forced platform do not mix. Asking SteamCMD to
+        # verify the files of an OS it is not itself running on fails before the
+        # download even begins, and the wording is the same one a deleted branch
+        # produces:
+        #
+        #     ERROR! Failed to install app '222860' (Missing configuration)
+        #
+        # The identical command without `validate` downloads normally - measured
+        # 2026-08-19 against app 222860, the Left 4 Dead 2 dedicated server,
+        # which can only be installed from its Windows depot. Insisting on the
+        # flag buys nothing and costs the whole install, so drop it, say so, and
+        # let the sentinel decide whether the run worked.
+        if [ "${#validate_arg[@]}" -gt 0 ] && [ -n "${STEAMCMD_PLATFORM:-}" ] \
+            && [ "${failed}" -eq 1 ] \
+            && grep -qiE "Missing configuration" "${log_file}" 2>/dev/null; then
+            pterohost_log "SteamCMD will not validate app ${appid} against the forced ${STEAMCMD_PLATFORM} depot - retrying without validate."
+            validate_arg=()
+            continue
+        fi
+
         if [ "${failed}" -eq 1 ]; then
             pterohost_log "attempt ${attempt}: SteamCMD reported a failure (see above)."
         else

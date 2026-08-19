@@ -59,6 +59,9 @@ jobs:
       - name: shared/kvconf.test.sh
         run: bash shared/kvconf.test.sh
 
+      - name: shared/cvarconf.test.sh
+        run: bash shared/cvarconf.test.sh
+
   # steamcmd_base builds on its own rather than as one leg of the big matrix.
   # The nine game images are FROM it, so they used to wait on `needs: build` -
   # the whole 19-tag matrix, java_26_ea and a Docker Hub timeout included. One
@@ -160,6 +163,16 @@ jobs:
             # glibc >= 2.38 and the SteamCMD base is debian:12 (2.36), so this
             # one is FROM ubuntu:24.04 and does not wait on steamcmd_base.
             # The slowest leg in either matrix - the Proton tarball is 532 MB.
+            platforms: linux/amd64
+          - tag: source_proton
+            dir: source-proton
+            # Same start-source bootstrap as the `source` tag, but on the
+            # Windows depot under GE-Proton. It exists for Left 4 Dead 2 alone:
+            # Valve's appinfo for app 222860 has one launch entry, srcds.exe
+            # with oslist "windows", and no common.oslist, so SteamCMD refuses
+            # the Linux install outright. Here rather than in `derived` for the
+            # same reason as palworld_proton - GE-Proton needs glibc >= 2.38 and
+            # the SteamCMD base is debian:12.
             platforms: linux/amd64
           - tag: gmod_classic
             dir: gmod-classic

@@ -22,6 +22,7 @@ cd /home/container || exit 1
 
 . /usr/local/lib/pterohost/steam-update.sh
 . /usr/local/lib/pterohost/launch.sh
+. /usr/local/lib/pterohost/cvarconf.sh
 
 APPID="${SRCDS_APPID:-232250}"
 GAME="${SRCDS_GAME:-tf}"
@@ -29,31 +30,107 @@ MAP="${SRCDS_MAP:-}"
 MAX_PLAYERS="${MAX_PLAYERS:-}"
 TICKRATE="${TICKRATE:-}"
 
-pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" "/home/container/srcds_run" || true
+# Рантайм: нативный Linux-srcds или тот же srcds под Proton.
+#
+# proton существует ровно ради Left 4 Dead 2. В appinfo приложения 222860 у
+# Valve осталась одна launch-запись, srcds.exe с oslist "windows", а
+# common.oslist нет вовсе - и SteamCMD отказывает ещё до скачивания:
+#
+#     ERROR! Failed to install app '222860' (Invalid platform)
+#
+# Проверено 19.08.2026: отказ даёт и аноним, и логин под аккаунтом, и
+# +@sSteamCmdForcePlatformType linux, и -beta public. Linux-депо (222863)
+# существует, но лицензии на него у анонима нет. С windows-платформой то же
+# приложение качается штатно. Остальные наши appid прогнаны через тот же тест -
+# 222860 единственный, кто в этот шлюз упирается, так что переносить сюда
+# что-то ещё смысла нет: Proton только медленнее.
+SRCDS_RUNTIME="${SRCDS_RUNTIME:-linux}"
 
-# Некоторые депо кладут игру в подкаталог, а не в корень тома. Тогда srcds_run
+if [ "${SRCDS_RUNTIME}" = "proton" ] && ! command -v proton >/dev/null 2>&1; then
+    pterohost_log "WARN: SRCDS_RUNTIME=proton, но в этом образе нет Proton - продолжаю на нативном рантайме."
+    SRCDS_RUNTIME="linux"
+fi
+
+if [ "${SRCDS_RUNTIME}" = "proton" ]; then
+    # Флаг платформы читает shared/steam-update.sh и ставит его ДО +login,
+    # иначе SteamCMD его игнорирует и приносит Linux-депо.
+    export STEAMCMD_PLATFORM=windows
+    SRCDS_BINARY_NAME="srcds.exe"
+
+    # proton не стартует без обеих переменных и падает голым traceback'ом.
+    # Префикс живёт в томе, поэтому переживает перезапуск и пересоздание
+    # контейнера; wineserver на остановке ищут именно по WINEPREFIX.
+    export STEAM_COMPAT_DATA_PATH="${SRCDS_PROTON_PREFIX:-/home/container/.proton}"
+    export STEAM_COMPAT_CLIENT_INSTALL_PATH="/home/container/.steam"
+    export WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx"
+    mkdir -p "${STEAM_COMPAT_DATA_PATH}" "${STEAM_COMPAT_CLIENT_INSTALL_PATH}"
+else
+    SRCDS_BINARY_NAME="srcds_run"
+fi
+
+pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \
+    "/home/container/${SRCDS_BINARY_NAME}" || true
+
+# Некоторые депо кладут игру в подкаталог, а не в корень тома. Тогда бинарь
 # лежит глубже, и запускать надо оттуда - иначе -game не найдёт мод.
-if [ ! -f /home/container/srcds_run ]; then
-    nested="$(find /home/container -maxdepth 3 -name srcds_run -type f | head -n 1)"
+if [ ! -f "/home/container/${SRCDS_BINARY_NAME}" ]; then
+    nested="$(find /home/container -maxdepth 3 -name "${SRCDS_BINARY_NAME}" -type f | head -n 1)"
     if [ -n "${nested}" ]; then
         cd "$(dirname "${nested}")" || exit 1
-        pterohost_log "srcds_run найден в $(pwd)"
+        pterohost_log "${SRCDS_BINARY_NAME} найден в $(pwd)"
     fi
 fi
+
+SRCDS_BINARY="./${SRCDS_BINARY_NAME}"
 
 # Часть депо (например Insurgency, app 237410) вообще не кладёт srcds_run -
 # только сам бинарь srcds_linux. Апстримный egg этого не учитывает и запускает
 # ./srcds_run, которого нет: сервер падает сразу, ещё до установки.
-SRCDS_BINARY="./srcds_run"
-if [ ! -f "${PWD}/srcds_run" ] && [ -f "${PWD}/srcds_linux" ]; then
+if [ "${SRCDS_RUNTIME}" != "proton" ] && [ ! -f "${PWD}/srcds_run" ] && [ -f "${PWD}/srcds_linux" ]; then
     SRCDS_BINARY="./srcds_linux"
     pterohost_log "srcds_run отсутствует, запускаю srcds_linux"
+fi
+
+# ---------------------------------------------------------------------------
+# server.cfg: имя сервера и слоты.
+# ---------------------------------------------------------------------------
+# Движок exec'ает <game>/cfg/server.cfg после КАЖДОЙ загрузки карты, и это
+# единственное место, где такие настройки держатся. До этого имени у клиента не
+# было вообще: в яйце нет переменной под hostname, файла в свежей установке нет
+# ("exec: couldn't exec server.cfg" в логе), и сервер уходил в браузер под
+# названием игры - "Left 4 Dead 2". Ровно та же болезнь, что была у Project
+# Zomboid, только в другой игре.
+#
+# Панель владеет только своими cvar'ами; всё остальное в файле - хозяйское и
+# не трогается. Пусто в переменной - файл остаётся как есть.
+CFG_DIR="${PWD}/${GAME}/cfg"
+CFG="${CFG_DIR}/server.cfg"
+
+if mkdir -p "${CFG_DIR}" 2>/dev/null; then
+    [ -f "${CFG}" ] || printf '// Pterohost: строки ниже ставит панель, остальное ваше.\n' > "${CFG}"
+
+    cvar_set_owned "${CFG}" hostname "${SERVER_NAME:-}"
+
+    # sv_maxplayers, а не -maxplayers: у Left 4 Dead 2 движковый ключ сам по
+    # себе не поднимает лобби выше четырёх, а значение из командной строки
+    # сбрасывается при загрузке карты - сервер так и отдаёт 0/4. В server.cfg
+    # оно применяется после каждой карты и держится.
+    if [ "${GAME}" = "left4dead2" ] && [ -n "${MAX_PLAYERS}" ]; then
+        cvar_set "${CFG}" sv_maxplayers "${MAX_PLAYERS}"
+    fi
+
+    [ -n "${SERVER_NAME:-}" ] && pterohost_log "Имя сервера: ${SERVER_NAME}"
+else
+    pterohost_log "WARN: ${CFG_DIR} недоступен для записи - имя сервера и слоты останутся движковыми."
 fi
 
 pterohost_panel_argv "$@"
 if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
     PTEROHOST_ARGS=("${SRCDS_BINARY}" -game "${GAME}" -console -port "${SERVER_PORT:-27015}" \
-        +ip 0.0.0.0 -norestart)
+        +ip 0.0.0.0)
+    # -norestart понимает обёртка srcds_run, а не сам движок: у srcds.exe этого
+    # флага нет.
+    [ "${SRCDS_RUNTIME}" = "proton" ] || PTEROHOST_ARGS+=(-norestart)
 fi
 
 # Слоты: главное, ради чего этот образ существует.
@@ -93,4 +170,59 @@ fi
 
 pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
-exec "${PTEROHOST_ARGS[@]}"
+
+if [ "${SRCDS_RUNTIME}" != "proton" ]; then
+    exec "${PTEROHOST_ARGS[@]}"
+fi
+
+# ---------------------------------------------------------------------------
+# Запуск под Proton.
+# ---------------------------------------------------------------------------
+# runinprefix, а не run: `proton run` поднимает игру через steam.exe, который
+# перехватывает вывод, и консоль в панели остаётся пустой. runinprefix
+# запускает бинарь в том же префиксе и оба потока сохраняет.
+#
+# exec здесь нельзя: под Proton дочерний процесс - это лаунчер, а сервер живёт
+# в wine. Без своего обработчика SIGTERM уходит лаунчеру, srcds остаётся жив, и
+# контейнер добивает Wings через таймаут.
+CHILD=""
+
+graceful_stop() {
+    if [ -n "${RCON_PASSWORD:-}" ] && command -v rcon >/dev/null 2>&1; then
+        pterohost_log "Остановка: отправляю quit по RCON."
+        rcon -a "127.0.0.1:${SERVER_PORT:-27015}" -p "${RCON_PASSWORD}" quit >/dev/null 2>&1 || true
+        for _ in $(seq 1 "${SRCDS_STOP_TIMEOUT:-30}"); do
+            [ -n "${CHILD}" ] && kill -0 "${CHILD}" 2>/dev/null || break
+            sleep 1
+        done
+    fi
+
+    wineserver -k 2>/dev/null \
+        || "${PROTON_DIR:-/opt/pterohost-proton}/files/bin/wineserver" -k 2>/dev/null \
+        || true
+}
+
+trap graceful_stop SIGTERM SIGINT
+
+# Консоль панели, сохранённая на отдельном дескрипторе. Фоновой задаче bash даёт
+# /dev/null вместо stdin, если не перенаправить его явно, - а srcds.exe собран
+# как GUI-бинарь и с -console поднимает консоль поверх stdin. Без этой строки он
+# застревает на pipe_read с 39 МБ RSS и 0% CPU: порт не открывается, в консоли
+# ни строчки, и выглядит это как "сервер запускается и ничего не делает".
+exec 4<&0
+
+LAUNCHER=(proton "${SRCDS_PROTON_VERB:-runinprefix}")
+
+# srcds.exe - GUI-бинарь, и движок идёт по оконному пути даже с -console: по
+# дороге он подгружает comctl32, dinput8, XInput1_4, winex11.drv и шейдерные
+# модули. Без дисплея он на этом и останавливается - 0% CPU, 39 МБ, порт не
+# открыт, в консоли ни строчки. Xvfb даёт экран, в который никто не смотрит.
+if [ "${SRCDS_HEADLESS_DISPLAY:-1}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
+    LAUNCHER=(xvfb-run -a -s "-screen 0 640x480x16" "${LAUNCHER[@]}")
+fi
+
+"${LAUNCHER[@]}" "${PTEROHOST_ARGS[@]}" <&4 &
+CHILD=$!
+
+wait "${CHILD}"
+exit $?
