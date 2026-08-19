@@ -314,8 +314,11 @@ fi
 # owner sees is not a stack trace - it is players stuck in animations and
 # interactions that cancel themselves, because the server's action state machine
 # is missing states the (Windows, case-insensitive) clients have. Measured on
-# service 7474: 96 AnimSets from Lifestyle: Hobbies and Sapph's Cooking failed
-# to parse, and the count went to zero once the lowercase paths existed.
+# service 7474: 32 AnimSets failed to parse on every boot - 27 from Lifestyle:
+# Hobbies, 5 from Sapph's Cooking - and the count went to zero once the
+# lowercase paths existed. (Each failure writes three AnimNode.Parse lines, so
+# the raw log line count is 96; the commit that introduced this quoted that
+# number as the count of broken AnimSets, which it is not.)
 #
 # So mirror the names, and mirror them narrowly. Symlinks, not renames: the
 # walker still opens the mixed-case spelling, so both have to work at once.
