@@ -39,7 +39,18 @@
 #    and SERVER_DESCRIPTION now own those two keys, and when they are empty the
 #    file is left alone rather than reset.
 #
-# 5. MOD ANIMATIONS ON A CASE-SENSITIVE FILESYSTEM. Build 42 finds an AnimSet
+# 5. RENAMING THE SERVER USED TO DESTROY IT. The other half of the same split:
+#    -servername does not only pick a filename, it picks the config, the sandbox
+#    settings, the spawn files, the player database and the world directory, all
+#    under that one name. So changing it in the panel renamed nothing - it
+#    pointed the server at a name nothing existed under and the game built all
+#    of it from scratch. The owner restarted into an empty map with no mods, no
+#    settings and no players, while every byte of the real server sat on disk
+#    under the old name where the panel could not see it. 14 of 62 live servers
+#    were carrying worlds abandoned exactly that way, one of them 177 MB of
+#    played game. Section 3 now moves the data to follow the name.
+#
+# 6. MOD ANIMATIONS ON A CASE-SENSITIVE FILESYSTEM. Build 42 finds an AnimSet
 #    by its real name on disk but resolves the files it references through a
 #    path it has lowercased end to end, so mods that ship media/AnimSets fail
 #    to parse on Linux and only on Linux. The states they define are then never
@@ -57,6 +68,8 @@ cd /home/container || exit 1
 . /usr/local/lib/pterohost/steam-update.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/kvconf.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/identity.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
 
@@ -245,10 +258,33 @@ fi
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 
 # ---------------------------------------------------------------------------
-# 3. Server ini: ports, RCON and the public name must agree with the panel.
+# 3. The world follows the name, then the ini agrees with the panel.
 # ---------------------------------------------------------------------------
-INI="${ZOMBOID_DIR}/Server/${SERVER_NAME}.ini"
+#
+# Everything Zomboid keeps for a server is filed under -servername, so the panel
+# field that looks like a display name is really the key to the owner's data.
+# pterohost_ident_sync moves that data when the name changes; it never deletes,
+# never overwrites, and refuses rather than half-finishing. See
+# shared/identity.sh for the rules and the fleet damage that motivated them.
+#
+# This runs before anything below reads or seeds the ini, because on the first
+# boot after a rename the migration is what puts the ini where the rest of this
+# section expects to find it.
 mkdir -p "${ZOMBOID_DIR}/Server"
+
+(
+    cd "${ZOMBOID_DIR}" || exit 0
+    pterohost_ident_sync "/home/container/.pterohost-world-identity" "${SERVER_NAME}" \
+        'Saves/Multiplayer/@' \
+        'Server/@.ini' \
+        'Server/@.ini.pterohost-orig' \
+        'Server/@_SandboxVars.lua' \
+        'Server/@_spawnpoints.lua' \
+        'Server/@_spawnregions.lua' \
+        'db/@.db'
+)
+
+INI="${ZOMBOID_DIR}/Server/${SERVER_NAME}.ini"
 
 if [ ! -f "${INI}" ]; then
     # First boot: the game has not written its config yet. Seed a minimal file;
