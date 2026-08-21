@@ -11,6 +11,17 @@
 # the panel could not see it - server 3543 on the fleet is carrying exactly that,
 # an abandoned Servers/unturned beside the one it actually runs.
 # pterohost_ident_sync moves the instance to follow the field.
+#
+# The other half: Unturned runs Servers/<instance>/Server/Commands.dat AFTER the
+# command line and the last write wins, so every -name, -port and -map the panel
+# puts on the launch line is silently overridden by whatever an owner once put in
+# that file. Three of the seven live servers were advertising a name the panel
+# did not show, and one had a `Port 27015` line that moved the game off the
+# allocation the node forwards - it had been unreachable since 2026-08-02. The
+# panel now writes the file rather than only the launch line.
+#
+# Map is deliberately left alone. Worlds live in Servers/<instance>/Level/<map>/,
+# so making the panel authoritative for it would orphan the owner's save.
 
 set -u
 cd /home/container || exit 1
@@ -19,6 +30,8 @@ cd /home/container || exit 1
 . /usr/local/lib/pterohost/steam-update.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/identity.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/datconf.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
 
@@ -88,6 +101,47 @@ for arg in "${PTEROHOST_ARGS[@]}"; do
     esac
 done
 [ "${instance_set}" = "0" ] && PTEROHOST_ARGS+=("+InternetServer/${SERVER_FOLDER}")
+
+# Commands.dat, resolved from the instance that will actually be loaded rather
+# than from SERVER_FOLDER, so an owner who put +InternetServer/Other in
+# ADDITIONAL_ARGS does not get the panel writing into a folder the game ignores.
+INSTANCE="${SERVER_FOLDER}"
+for arg in "${PTEROHOST_ARGS[@]}"; do
+    case "${arg}" in
+        +InternetServer/*|+LanServer/*) INSTANCE="${arg#*/}" ;;
+    esac
+done
+
+DAT="/home/container/Servers/${INSTANCE}/Server/Commands.dat"
+mkdir -p "$(dirname "${DAT}")"
+[ -f "${DAT}" ] || : > "${DAT}"
+dat_backup_once "${DAT}"
+
+# The port is the panel's outright - it is the allocation the node forwards, and
+# a Commands.dat that disagrees makes the server unreachable while looking fine.
+dat_set "${DAT}" Port "${SERVER_PORT}"
+
+# Unturned ignores a name shorter than five characters and falls back to
+# "Unturned". Writing one anyway would destroy whatever the owner has in the
+# file to no purpose, so refuse and say why.
+if [ -z "${NAME:-}" ] || [ "${#NAME}" -ge 5 ]; then
+    dat_set_owned "${DAT}" Name "${NAME:-}"
+else
+    log "WARN: the server name '${NAME}' is shorter than the five characters Unturned requires - it is ignored by the game, and Commands.dat has been left alone. Set a longer name in the panel."
+fi
+
+if [ -n "${NAME:-}" ] && [ "${#NAME}" -ge 5 ]; then
+    log "Server name: ${NAME}"
+else
+    log "Server name left to Commands.dat ($(dat_get "${DAT}" Name)); set it in the panel to manage it from there."
+fi
+
+# Anything else in Commands.dat that shadows a panel field is reported rather
+# than overwritten, so support can see the divergence without opening SFTP.
+for shadowed in Map MaxPlayers Mode Perspective; do
+    value="$(dat_get "${DAT}" "${shadowed}")"
+    [ -n "${value}" ] && log "Note: Commands.dat sets ${shadowed} to '${value}', which overrides the panel setting. Edit the file to change it."
+done
 
 log "Starting Unturned '${NAME:-Unturned Server}' on port ${SERVER_PORT} (${SERVER_MAP:-PEI})."
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
