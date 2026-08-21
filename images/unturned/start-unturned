@@ -16,8 +16,9 @@
 # command line and the last write wins, so every -name, -port and -map the panel
 # puts on the launch line is silently overridden by whatever an owner once put in
 # that file. Three of the seven live servers were advertising a name the panel
-# did not show, and one had a `Port 27015` line that moved the game off the
-# allocation the node forwards - it had been unreachable since 2026-08-02. The
+# did not show, and server 3511 has a `Port 27015` line pointing the game at a
+# port the node does not forward - latent rather than live, because that server
+# is suspended, but it would bind the wrong port the moment it came back. The
 # panel now writes the file rather than only the launch line.
 #
 # Map is deliberately left alone. Worlds live in Servers/<instance>/Level/<map>/,
