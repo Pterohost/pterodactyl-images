@@ -10,12 +10,22 @@
 # 2. The query port is gameport+1, and Valheim binds it itself - the panel does
 #    not allocate it. That is why the panel's query registry allows an
 #    unassigned +1 for this game specifically.
+#
+# 3. -world names the save, and it is an editable panel field. Changing it did
+#    not rename the world, it pointed the server at a world that did not exist,
+#    so the game generated a fresh one and the old map, bases and characters
+#    stayed on disk under the old name with no way to reach them from the panel.
+#    pterohost_ident_sync now moves the save to follow the field, rolled backups
+#    included - leaving those behind would throw away the only copies that
+#    survive a corrupted world.
 
 set -u
 cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/identity.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
 
@@ -31,6 +41,24 @@ else
     log "AUTO_UPDATE=0 - skipping SteamCMD."
     pterohost_steam_seed
     pterohost_steam_sdk
+fi
+
+# The save follows -world. Valheim keeps a world as <name>.db and <name>.fwl,
+# the previous pair as .old, and its rolled autosaves as
+# <name>_backup_auto-<timestamp>.{db,fwl}; all of them move together or not at
+# all. See shared/identity.sh for the rules.
+VALHEIM_SAVE_DIR="${HOME:-/home/container}/.config/unity3d/IronGate/Valheim"
+if [ -d "${VALHEIM_SAVE_DIR}/worlds_local" ]; then
+    (
+        cd "${VALHEIM_SAVE_DIR}" || exit 0
+        pterohost_ident_sync "/home/container/.pterohost-world-identity" "${WORLD:-Dedicated}" \
+            'worlds_local/@.db' \
+            'worlds_local/@.fwl' \
+            'worlds_local/@.db.old' \
+            'worlds_local/@.fwl.old' \
+            'worlds_local/@_backup_auto-*.db' \
+            'worlds_local/@_backup_auto-*.fwl'
+    )
 fi
 
 # BepInEx, when the server has it installed. Loading doorstop unconditionally

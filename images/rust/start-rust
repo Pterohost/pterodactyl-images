@@ -40,11 +40,21 @@ BRANCH="$(echo "${STEAM_BRANCH:-public}" | tr '[:upper:]' '[:lower:]')"
 log() { printf '[rust] %s\n' "$*"; }
 
 # shellcheck source=/dev/null
+. /usr/local/lib/pterohost/identity.sh
+# shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
 
 BINARY="./RustDedicated"
 
 cd /home/container || { log "FATAL: cannot cd /home/container"; exit 1; }
+
+# +server.identity names server/<identity>, which is the whole server: the map,
+# the saves, the player blueprints, the clan database, the loadouts and cfg. It
+# is an editable panel field, so changing it did not rename anything - it pointed
+# Rust at an identity that did not exist and it generated a fresh world, leaving
+# the real one on disk where the panel could not reach it. The data now follows
+# the field; see shared/identity.sh for the rules.
+pterohost_ident_sync "/home/container/.pterohost-server-identity" "${SERVER_IDENTITY:-rust}" 'server/@'
 
 # Wings gives the container a small (~100 MB) /tmp tmpfs; SteamCMD stages far more
 # than that and fails with "Missing configuration" when /tmp fills. Point TMPDIR
