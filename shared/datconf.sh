@@ -15,11 +15,12 @@
 # AFTER the command line, and last write wins - so every -name, -port and -map
 # the panel puts on the launch line is silently overridden by whatever is in
 # here. On the fleet that made the panel's Name field cosmetic on three of seven
-# servers (their owners had edited the file over SFTP and the panel went on
-# showing something else), and on one server a `Port 27015` line moved the game
-# off the allocation the node forwards, so it had been unreachable since
-# 2026-08-02. The panel has to write this file or it does not really own any of
-# these settings.
+# servers - their owners had edited the file over SFTP and the panel went on
+# showing something else - and on server 3511 a `Port 27015` line points the game
+# at a port the node does not forward at all. That one is latent rather than
+# live: the server is suspended today, so it would only bind the wrong port the
+# moment it came back. The panel has to write this file or it does not really own
+# any of these settings.
 #
 # Two things kvconf.sh does not have to deal with:
 #
