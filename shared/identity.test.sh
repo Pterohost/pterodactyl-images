@@ -177,5 +177,59 @@ world Kept "kept world"
 sync_as ""
 check "an empty server name changes nothing" "Kept," "$(inventory)"
 
+# --- 12. glob templates, which is how Valheim keeps its rolled backups ------
+VALHEIM=(
+    'worlds_local/@.db'
+    'worlds_local/@.fwl'
+    'worlds_local/@_backup_auto-*.db'
+    'worlds_local/@_backup_auto-*.fwl'
+)
+vsync() { ( cd "${WORK}" && pterohost_ident_sync "${STATE}" "$1" "${VALHEIM[@]}" ); }
+vworld() {
+    mkdir -p "${WORK}/worlds_local"
+    printf 'world %s' "$1" > "${WORK}/worlds_local/$1.db"
+    printf 'seed %s'  "$1" > "${WORK}/worlds_local/$1.fwl"
+    printf 'backup a' > "${WORK}/worlds_local/$1_backup_auto-20260819185151.db"
+    printf 'backup a' > "${WORK}/worlds_local/$1_backup_auto-20260819185151.fwl"
+    printf 'backup b' > "${WORK}/worlds_local/$1_backup_auto-20260821013956.db"
+}
+
+reset; rm -rf "${WORK}/worlds_local"
+vworld ALLAHH333
+vsync ALLAHH333
+vsync Valhalla
+check "a glob template moves the world itself" "world ALLAHH333" \
+    "$(cat "${WORK}/worlds_local/Valhalla.db" 2>/dev/null)"
+check "and the seed file" "seed ALLAHH333" \
+    "$(cat "${WORK}/worlds_local/Valhalla.fwl" 2>/dev/null)"
+check "and every rolled backup, keeping its timestamp" \
+    "Valhalla.db,Valhalla.fwl,Valhalla_backup_auto-20260819185151.db,Valhalla_backup_auto-20260819185151.fwl,Valhalla_backup_auto-20260821013956.db," \
+    "$(ls "${WORK}/worlds_local" | LC_ALL=C sort | tr '\n' ',')"
+check "backup contents survive" "backup b" \
+    "$(cat "${WORK}/worlds_local/Valhalla_backup_auto-20260821013956.db" 2>/dev/null)"
+
+# a collision on one glob match must abandon the whole migration, not most of it
+reset; rm -rf "${WORK}/worlds_local"
+vworld Source
+printf 'not yours' > "${WORK}/worlds_local/Target_backup_auto-20260819185151.db"
+vsync Source
+out="$(vsync Target 2>&1)"
+check "a colliding backup abandons the whole rename" "world Source" \
+    "$(cat "${WORK}/worlds_local/Source.db" 2>/dev/null)"
+check "and leaves the colliding file alone" "not yours" \
+    "$(cat "${WORK}/worlds_local/Target_backup_auto-20260819185151.db" 2>/dev/null)"
+check "and no half-moved world appears" "" \
+    "$(cat "${WORK}/worlds_local/Target.db" 2>/dev/null)"
+check "and it says why" "1" "$(printf '%s' "${out}" | grep -c 'already exists')"
+
+# a glob that matches nothing is not an error
+reset; rm -rf "${WORK}/worlds_local"
+mkdir -p "${WORK}/worlds_local"
+printf 'lonely world' > "${WORK}/worlds_local/Solo.db"
+vsync Solo
+vsync Duo
+check "a glob matching nothing does not stop the rest" "lonely world" \
+    "$(cat "${WORK}/worlds_local/Duo.db" 2>/dev/null)"
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

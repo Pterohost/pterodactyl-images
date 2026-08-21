@@ -3,12 +3,22 @@
 #
 # Unturned reads console commands from stdin and the egg's stop command is
 # "shutdown", so no console bridge is needed - exec is enough.
+#
+# SERVER_FOLDER is the instance name in +InternetServer/<folder>, and everything
+# the server owns lives under Servers/<folder>: the level, the players, the
+# config, the permissions. It is also an editable panel field, so changing it
+# used to hand the owner a brand new server and leave the real one on disk where
+# the panel could not see it - server 3543 on the fleet is carrying exactly that,
+# an abandoned Servers/unturned beside the one it actually runs.
+# pterohost_ident_sync moves the instance to follow the field.
 
 set -u
 cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/identity.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
 
@@ -17,6 +27,8 @@ log() { pterohost_log "$@"; }
 APPID="${SRCDS_APPID:-1110390}"
 SERVER_FOLDER="${SERVER_FOLDER:-unturned}"
 BINARY="./Unturned_Headless.x86_64"
+
+pterohost_ident_sync "/home/container/.pterohost-server-identity" "${SERVER_FOLDER}" 'Servers/@'
 
 if [ "${GAME_AUTOUPDATE:-1}" = "1" ] || [ "${AUTO_UPDATE:-0}" = "1" ]; then
     pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \

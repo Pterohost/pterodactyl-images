@@ -69,6 +69,7 @@ WORKDIR /home/container
 COPY --chmod=755 shared/entrypoint.sh /entrypoint.sh
 COPY --chmod=755 shared/sysinfo.sh /sysinfo.sh
 COPY --chmod=755 shared/launch.sh /usr/local/lib/pterohost/launch.sh
+COPY --chmod=755 shared/identity.sh /usr/local/lib/pterohost/identity.sh
 COPY shared/motd.txt /motd.txt
 COPY shared/nodes.tsv /etc/pterohost/nodes.tsv
 COPY --chmod=755 images/rust/start-rust /usr/local/bin/start-rust

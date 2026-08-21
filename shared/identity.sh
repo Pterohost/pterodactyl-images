@@ -60,7 +60,17 @@
 #
 # The first template after the state file and the new name is the WITNESS: the
 # one whose existence means "this name has real data". Everything after it comes
-# along for the ride. The witness is moved too - it does not need repeating.
+# along for the ride. The witness is moved too - it does not need repeating, and
+# it must be an exact path because it is also what an unrecorded previous name is
+# discovered from.
+#
+# Any template after the witness may also carry a *, for the games that write a
+# family of files rather than one. Valheim is the reason: a world is
+# worlds_local/<name>.db and .fwl, but its rolled backups are
+# worlds_local/<name>_backup_auto-20260821013956.db, and a rename that took the
+# world and left the backups behind would quietly throw away the only copies
+# that survive a corrupted save. So 'worlds_local/@_backup_auto-*.db' moves every
+# one of them, each keeping the part of its name that is not the identity.
 
 _pterohost_ident_log() {
     if declare -F pterohost_log >/dev/null 2>&1; then
@@ -73,6 +83,34 @@ _pterohost_ident_log() {
 # _pterohost_ident_path <template> <identity>
 _pterohost_ident_path() {
     printf '%s' "${1//@/$2}"
+}
+
+# _pterohost_ident_collect <template> <from> <new>
+#   Appends every (source, destination) pair this template resolves to onto
+#   _PTEROHOST_IDENT_SRC and _PTEROHOST_IDENT_DST. Sources that do not exist are
+#   skipped. Paired arrays rather than a returned string, because a filename is
+#   allowed to contain anything a separator could be.
+_pterohost_ident_collect() {
+    local template="$1" from="$2" new="$3"
+    local prefix="${template%%@*}" suffix="${template#*@}"
+    local source_prefix="${prefix}${from}" destination_prefix="${prefix}${new}"
+    local match tail
+
+    case "${suffix}" in
+        *'*'*)
+            for match in "${source_prefix}"${suffix}; do
+                [ -e "${match}" ] || continue
+                tail="${match#"${source_prefix}"}"
+                _PTEROHOST_IDENT_SRC+=("${match}")
+                _PTEROHOST_IDENT_DST+=("${destination_prefix}${tail}")
+            done
+            ;;
+        *)
+            [ -e "${source_prefix}${suffix}" ] || return 0
+            _PTEROHOST_IDENT_SRC+=("${source_prefix}${suffix}")
+            _PTEROHOST_IDENT_DST+=("${destination_prefix}${suffix}")
+            ;;
+    esac
 }
 
 # _pterohost_ident_candidates <witness template>
@@ -147,43 +185,42 @@ pterohost_ident_sync() {
 
     # Pre-flight. A destination that already exists means a partial migration,
     # so the whole thing is abandoned instead.
-    local templates=("${witness}" "$@")
-    local template source destination
-    local -a sources=() destinations=()
+    local template index
+    _PTEROHOST_IDENT_SRC=()
+    _PTEROHOST_IDENT_DST=()
 
-    for template in "${templates[@]}"; do
-        source="$(_pterohost_ident_path "${template}" "${from}")"
-        destination="$(_pterohost_ident_path "${template}" "${new}")"
-        [ -e "${source}" ] || continue
-        if [ -e "${destination}" ]; then
-            _pterohost_ident_log "WARN: cannot rename '${from}' to '${new}' - '${destination}' already exists. Nothing was moved, so the server keeps every file it had."
-            pterohost_ident_save "${state}" "${new}"
-            return 0
-        fi
-        sources+=("${source}")
-        destinations+=("${destination}")
+    for template in "${witness}" "$@"; do
+        _pterohost_ident_collect "${template}" "${from}" "${new}"
     done
 
-    if [ "${#sources[@]}" -eq 0 ]; then
+    if [ "${#_PTEROHOST_IDENT_SRC[@]}" -eq 0 ]; then
         pterohost_ident_save "${state}" "${new}"
         return 0
     fi
 
-    local index moved=0 failed=0
-    for index in "${!sources[@]}"; do
-        mkdir -p "$(dirname "${destinations[index]}")" 2>/dev/null
-        if mv -- "${sources[index]}" "${destinations[index]}" 2>/dev/null; then
+    for index in "${!_PTEROHOST_IDENT_DST[@]}"; do
+        if [ -e "${_PTEROHOST_IDENT_DST[index]}" ]; then
+            _pterohost_ident_log "WARN: cannot rename '${from}' to '${new}' - '${_PTEROHOST_IDENT_DST[index]}' already exists. Nothing was moved, so the server keeps every file it had."
+            pterohost_ident_save "${state}" "${new}"
+            return 0
+        fi
+    done
+
+    local moved=0 failed=0
+    for index in "${!_PTEROHOST_IDENT_SRC[@]}"; do
+        mkdir -p "$(dirname "${_PTEROHOST_IDENT_DST[index]}")" 2>/dev/null
+        if mv -- "${_PTEROHOST_IDENT_SRC[index]}" "${_PTEROHOST_IDENT_DST[index]}" 2>/dev/null; then
             moved=$((moved + 1))
         else
             failed=$((failed + 1))
-            _pterohost_ident_log "WARN: could not move '${sources[index]}' to '${destinations[index]}'."
+            _pterohost_ident_log "WARN: could not move '${_PTEROHOST_IDENT_SRC[index]}' to '${_PTEROHOST_IDENT_DST[index]}'."
         fi
     done
 
     if [ "${failed}" -gt 0 ]; then
         _pterohost_ident_log "WARN: renaming '${from}' to '${new}' moved ${moved} of $((moved + failed)) items. The rest are still under the old name - rename the server back in the panel to reach them."
     else
-        _pterohost_ident_log "Server name changed '${from}' -> '${new}': moved ${moved} items, so the world, the settings, the mod list and the players came with it."
+        _pterohost_ident_log "Server name changed '${from}' -> '${new}': moved ${moved} items, so everything filed under the old name - the world, the settings and the players - came with it."
     fi
 
     pterohost_ident_save "${state}" "${new}"
