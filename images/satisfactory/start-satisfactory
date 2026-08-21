@@ -6,6 +6,26 @@
 # API that needs a token. The panel speaks both, so nothing has to be enabled
 # here - but -multihome must bind all interfaces or the UDP probe never reaches
 # the container.
+#
+# Two things about the ports, both of which have cost a customer their server.
+#
+# 1. -ReliablePort MUST NOT equal the game port. The game binds the net driver
+#    there first, the reliable-messaging socket then cannot have it, and the
+#    server fails with NetDriverCreateFailure and loops back to the main menu
+#    for ever. Server 3763 was handed a RELIABLE_PORT equal to its allocation
+#    and spent eleven days doing exactly that - 34907 "Failed to bind server
+#    streaming socket to explicitly defined port no 16004" and 78192
+#    NetDriverCreateFailure in a 144 MB log - with the variable marked
+#    user_editable=0, so its owner could not have fixed it even knowing why.
+#
+# 2. The server's NAME and ADMIN PASSWORD live in ServerSettings.<port>.sav,
+#    keyed by the game port. Move a server to a different allocation and the
+#    game silently starts from a blank one: no name, and unclaimed, so the owner
+#    has to set an admin password again to get back in. 7 of the 11 live servers
+#    carry an orphaned ServerSettings file from exactly that; one carries three.
+#    The panel cannot write the name into this file - it is a length-prefixed
+#    GVAS StrProperty next to a 2 KB X.509 blob, and the game is its only
+#    author - but it can carry the file across when the port changes.
 
 set -u
 cd /home/container || exit 1
@@ -62,7 +82,31 @@ else
     PTEROHOST_ARGS=("${BINARY}" "${args[@]}")
 fi
 
-[ -n "${RELIABLE_PORT:-}" ] && pterohost_append_if_absent -ReliablePort "-ReliablePort=${RELIABLE_PORT}"
+if [ -z "${RELIABLE_PORT:-}" ]; then
+    :
+elif [ "${RELIABLE_PORT}" = "${SERVER_PORT}" ]; then
+    log "WARN: the reliable port (${RELIABLE_PORT}) is the same as the game port, which the game cannot do - dropping it and letting the game choose. Give this server a second allocation and set it there."
+else
+    pterohost_append_if_absent -ReliablePort "-ReliablePort=${RELIABLE_PORT}"
+fi
+
+# Carry the server name and the admin password across a port change. This only
+# ever creates a settings file that is missing or has never been claimed; a
+# server sitting on a stable port is never touched, and no world save is
+# involved - those live under SaveGames/server/ and are not keyed by port.
+SF_SAVE_DIR="/home/container/.config/Epic/FactoryGame/Saved/SaveGames"
+SF_SETTINGS="${SF_SAVE_DIR}/ServerSettings.${SERVER_PORT}.sav"
+if [ -d "${SF_SAVE_DIR}" ] && ! grep -qa ServerName "${SF_SETTINGS}" 2>/dev/null; then
+    for candidate in "${SF_SAVE_DIR}"/ServerSettings.*.sav; do
+        [ -f "${candidate}" ] || continue
+        [ "${candidate}" = "${SF_SETTINGS}" ] && continue
+        grep -qa ServerName "${candidate}" || continue
+        if cp -a "${candidate}" "${SF_SETTINGS}" 2>/dev/null; then
+            log "The game port changed, so the server name and admin password were carried over from $(basename "${candidate}") - you do not have to claim the server again."
+        fi
+        break
+    done
+fi
 
 # A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
 if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${ADDITIONAL_ARGS:-}" ]; then
