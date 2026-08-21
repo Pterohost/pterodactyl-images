@@ -45,6 +45,19 @@ if [ -f "${CFG}" ] && [ -n "${MAX_PLAYERS:-}" ]; then
     cfg_set "${CFG}" maxPlayers "${MAX_PLAYERS}"
 fi
 
+# The name in the public server list. Arma ships server.cfg with hostname
+# commented out, and the egg had no field for it, so five of the six live
+# servers were advertising the Bohemia default and the sixth had opened the file
+# manager and typed one in. SERVER_HOSTNAME owns the key now; empty leaves the
+# file alone, so that sixth server keeps its name.
+if [ -f "${CFG}" ]; then
+    cp -a "${CFG}" "${CFG}.pterohost-orig" 2>/dev/null || true
+    cfg_set_owned "${CFG}" hostname "${SERVER_HOSTNAME:-}"
+    if [ -n "${SERVER_HOSTNAME:-}" ]; then
+        log "Server name: ${SERVER_HOSTNAME}"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Mods. Same contract as DayZ: the egg publishes MODIFICATIONS and MOD_FILE, the
 # command line wants one -mod= list, and the workshop items behind it have to be

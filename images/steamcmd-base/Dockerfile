@@ -79,6 +79,7 @@ COPY --chmod=755 shared/launch.sh /usr/local/lib/pterohost/launch.sh
 COPY --chmod=755 shared/kvconf.sh /usr/local/lib/pterohost/kvconf.sh
 COPY --chmod=755 shared/identity.sh /usr/local/lib/pterohost/identity.sh
 COPY --chmod=755 shared/cfgconf.sh /usr/local/lib/pterohost/cfgconf.sh
+COPY --chmod=755 shared/xmlprop.sh /usr/local/lib/pterohost/xmlprop.sh
 COPY --chmod=755 shared/cvarconf.sh /usr/local/lib/pterohost/cvarconf.sh
 COPY --chmod=755 shared/jsonconf.sh /usr/local/lib/pterohost/jsonconf.sh
 COPY --chmod=755 shared/workshop.sh /usr/local/lib/pterohost/workshop.sh

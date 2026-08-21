@@ -9,12 +9,21 @@
 # CS2 answers Valve A2S on the game port with no extra configuration, so the
 # panel's status query needs nothing here - but -usercon is what makes RCON
 # available, and a GSLT is what makes the server publicly listed.
+#
+# The name players see is a cvar in game/csgo/cfg/server.cfg, and until now the
+# panel had no field for it: the only way to name a CS2 server here was to open
+# the file manager and type it in. Eight of the nineteen live servers had done
+# exactly that; the other eleven had no hostname line at all and were advertising
+# Valve's default. SERVER_HOSTNAME now owns the cvar, and leaving it empty leaves
+# the file alone - so the eight keep the name they typed.
 
 set -u
 cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/cvarconf.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
 
@@ -30,6 +39,22 @@ else
     log "SRCDS_STOP_UPDATE=1 - skipping SteamCMD."
     pterohost_steam_seed
     pterohost_steam_sdk
+fi
+
+# The name players see. server.cfg is the file that matters rather than the
+# launch line, because the engine exec's it after every map load and a cvar set
+# on the command line does not survive that.
+CS2_CFG="/home/container/game/csgo/cfg/server.cfg"
+if [ -n "${SERVER_HOSTNAME:-}" ] && [ ! -f "${CS2_CFG}" ] && [ -d "$(dirname "${CS2_CFG}")" ]; then
+    : > "${CS2_CFG}"
+fi
+if [ -f "${CS2_CFG}" ]; then
+    cvar_set_owned "${CS2_CFG}" hostname "${SERVER_HOSTNAME:-}"
+    if [ -n "${SERVER_HOSTNAME:-}" ]; then
+        log "Server name: ${SERVER_HOSTNAME}"
+    else
+        log "Server name left to server.cfg ($(cvar_get "${CS2_CFG}" hostname)); set it in the panel to manage it from there."
+    fi
 fi
 
 # The base command, used only when the panel did not supply one (an egg that

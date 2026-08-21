@@ -8,12 +8,24 @@
 #
 # The bridge lived in the egg's startup command before, as a long shell
 # one-liner in the panel database. Here it can be read, fixed and versioned.
+#
+# The name and blurb players see are properties in serverconfig.xml, and the egg
+# had no field for either: the only way to name a 7DTD server here was to edit
+# the XML by hand. Four of the six live servers had done it; two were still
+# advertising "My Game Host". SERVER_NAME and SERVER_DESCRIPTION own those two
+# properties now, and leaving them empty leaves the file alone.
+#
+# GameName is deliberately NOT exposed. It names the save directory, so a panel
+# field for it would be a button that quietly starts a new world - the trap that
+# cost Project Zomboid owners theirs.
 
 set -u
 cd /home/container || exit 1
 
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/steam-update.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/xmlprop.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/launch.sh
 
@@ -34,6 +46,18 @@ fi
 
 export LD_LIBRARY_PATH="/home/container:${LD_LIBRARY_PATH:-}"
 mkdir -p logs
+
+# The name and blurb in the server browser.
+SEVENDTD_XML="/home/container/serverconfig.xml"
+if [ -f "${SEVENDTD_XML}" ]; then
+    xmlprop_set_owned "${SEVENDTD_XML}" ServerName "${SERVER_NAME:-}"
+    xmlprop_set_owned "${SEVENDTD_XML}" ServerDescription "${SERVER_DESCRIPTION:-}"
+    if [ -n "${SERVER_NAME:-}" ]; then
+        log "Server name: ${SERVER_NAME}"
+    else
+        log "Server name left to serverconfig.xml ($(xmlprop_get "${SEVENDTD_XML}" ServerName)); set it in the panel to manage it from there."
+    fi
+fi
 
 # The base command, used only when the panel did not supply one (an egg that
 # still reads "start-7dtd" and nothing else).
