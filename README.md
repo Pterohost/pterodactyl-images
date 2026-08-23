@@ -100,6 +100,17 @@ startup command is `start-zomboid`. Per boot it:
   gameplay key the owner tuned alone. RCON matters because Zomboid's A2S reply
   carries **no player names** - RCON `players` is the only way the panel can
   list who is online;
+- **preloads `libjsig.so` by absolute path**, chosen from whichever layout the
+  bundled JRE actually has on disk - `jre64/lib/amd64/` on Build 41, and
+  `jre64/lib/` on the Zulu 25 JRE current builds ship, which has no `amd64`
+  directory at all. Preloading it by bare name instead relies on
+  `LD_LIBRARY_PATH`, which only ever named the B41 path, so ld.so answered
+  `object 'libjsig.so' from LD_PRELOAD cannot be preloaded ... : ignored` on
+  every exec whose binary carries no RUNPATH into the JRE. `jre64/bin/java`
+  does carry one, so the JVM loaded it anyway and only the pzexe ELF launcher
+  failed - two alarming error lines per boot on every Zomboid console, for a
+  preload that was in fact working. An absolute path depends on neither
+  `LD_LIBRARY_PATH` nor anybody's RUNPATH;
 - turns SIGTERM into a `quit` on the game's stdin so the world is saved, waiting
   up to `ZOMBOID_STOP_TIMEOUT` (default 90s) before escalating. The console
   forwarder that carries `quit` reads from a saved copy of stdin (`exec 4<&0`):

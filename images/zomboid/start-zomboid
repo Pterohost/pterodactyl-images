@@ -537,8 +537,34 @@ export LD_LIBRARY_PATH="./linux64:./natives:.:./jre64/lib/amd64:${LD_LIBRARY_PAT
 # stealing them. It ships inside the bundled JRE, so only preload it once the
 # game files are actually present - otherwise every boot before the first
 # SteamCMD run prints an ld.so preload error.
-if [ -f "/home/container/jre64/lib/amd64/libjsig.so" ] || [ -f "/home/container/jre64/lib/libjsig.so" ]; then
-    export LD_PRELOAD="${LD_PRELOAD:+${LD_PRELOAD}:}libjsig.so"
+#
+# Preload by ABSOLUTE path, and pick the path off disk rather than assuming one.
+# The bundled JRE changed layout: B41 shipped jre64/lib/amd64/libjsig.so, and
+# current builds ship a Zulu 25 JRE with jre64/lib/libjsig.so and no amd64
+# directory at all. The guard here accepted both, but LD_LIBRARY_PATH below only
+# ever named the amd64 one, so on every current build a bare "libjsig.so" was
+# unresolvable and ld.so printed
+#
+#   ERROR: ld.so: object 'libjsig.so' from LD_PRELOAD cannot be preloaded ...
+#
+# once for each exec whose binary carries no RUNPATH into the JRE - that is the
+# pzexe ELF launcher, twice per boot, on every Zomboid console. The JVM itself
+# happened to resolve it anyway because jre64/bin/java does have that RUNPATH,
+# which is why the preload still worked and only the noise was visible; an
+# absolute path depends on neither LD_LIBRARY_PATH nor anybody's RUNPATH.
+ZOMBOID_JRE_DIR="/home/container/jre64"
+ZOMBOID_JSIG=""
+for _jsig_candidate in "${ZOMBOID_JRE_DIR}/lib/amd64/libjsig.so" \
+                       "${ZOMBOID_JRE_DIR}/lib/libjsig.so" \
+                       "${ZOMBOID_JRE_DIR}/lib/server/libjsig.so"; do
+    if [ -f "${_jsig_candidate}" ]; then
+        ZOMBOID_JSIG="${_jsig_candidate}"
+        break
+    fi
+done
+unset _jsig_candidate
+if [ -n "${ZOMBOID_JSIG}" ]; then
+    export LD_PRELOAD="${LD_PRELOAD:+${LD_PRELOAD}:}${ZOMBOID_JSIG}"
 fi
 
 CHILD=""

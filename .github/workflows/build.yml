@@ -30,10 +30,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The contract tests take seconds and cover the two helpers every image
-  # depends on: the launch-line assembler and the Unreal tuple rewriter. Both
-  # have already shipped a bug that only surfaced on a customer's server, so
-  # nothing gets built until they pass.
+  # The contract tests take seconds and cover the helpers every image depends
+  # on - the launch-line assembler, the Unreal tuple rewriter - plus the one
+  # per-image bootstrap that has its own suite. Several of them have already
+  # shipped a bug that only surfaced on a customer's server, so nothing gets
+  # built until they pass. images/zomboid had a suite of its own that was never
+  # wired in here; it is now, because the defect it would have caught - a
+  # bootstrap naming a library ld.so could not find - reached 65 live servers.
   test:
     name: "shell contract tests"
     runs-on: ubuntu-latest
@@ -73,6 +76,9 @@ jobs:
 
       - name: shared/datconf.test.sh
         run: bash shared/datconf.test.sh
+
+      - name: images/zomboid/start-zomboid.test.sh
+        run: bash images/zomboid/start-zomboid.test.sh
 
   # steamcmd_base builds on its own rather than as one leg of the big matrix.
   # The nine game images are FROM it, so they used to wait on `needs: build` -
