@@ -541,9 +541,9 @@ export LD_LIBRARY_PATH="./linux64:./natives:.:./jre64/lib/amd64:${LD_LIBRARY_PAT
 # Preload by ABSOLUTE path, and pick the path off disk rather than assuming one.
 # The bundled JRE changed layout: B41 shipped jre64/lib/amd64/libjsig.so, and
 # current builds ship a Zulu 25 JRE with jre64/lib/libjsig.so and no amd64
-# directory at all. The guard here accepted both, but LD_LIBRARY_PATH below only
-# ever named the amd64 one, so on every current build a bare "libjsig.so" was
-# unresolvable and ld.so printed
+# directory at all. The guard here accepted both, but the LD_LIBRARY_PATH above
+# only ever named the amd64 one, so on every current build a bare "libjsig.so"
+# was unresolvable and ld.so printed
 #
 #   ERROR: ld.so: object 'libjsig.so' from LD_PRELOAD cannot be preloaded ...
 #
