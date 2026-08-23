@@ -1,5 +1,6 @@
 #!/bin/bash
-# Contract tests for the animation-path case mirror in images/zomboid/start-zomboid.
+# Contract tests for images/zomboid/start-zomboid: the animation-path case mirror,
+# and the libjsig preload path.
 #
 # The mirror exists because Build 42 opens the files an AnimSet references
 # through a path it has lowercased end to end, while the AnimSet itself was
@@ -15,7 +16,7 @@
 # update leaves dangling.
 #
 # Run: bash images/zomboid/start-zomboid.test.sh
-# Not yet wired into .github/workflows/build.yml.
+# Wired into the `test` job in .github/workflows/build.yml.
 
 set -u
 
@@ -132,6 +133,98 @@ mkdir -p "${B}/7777777777/mods/OffMod/common/media/AnimSets"
 zomboid_mirror_case >/dev/null
 check_absent "ZOMBOID_CASE_MIRROR=0 does nothing" \
     "${B}/7777777777/mods/OffMod/common/media/animsets"
+
+# ---------------------------------------------------------------------------
+# libjsig preload path
+# ---------------------------------------------------------------------------
+# The bug this covers: the guard accepted two JRE layouts while LD_LIBRARY_PATH
+# named only one, so on every current build the bootstrap exported the bare name
+# "libjsig.so" and ld.so answered "cannot be preloaded ... : ignored" on each
+# exec that had no RUNPATH into the JRE - twice per boot, on 65 live consoles.
+#
+# So the property asserted is not "LD_PRELOAD is set" - a bare name passes that,
+# which is exactly how this shipped. It is "whatever is exported is an absolute
+# path that exists", which is the only form ld.so can be relied on to resolve.
+
+load_jsig() { # <fake jre64 root> -> prints the LD_PRELOAD the block would export
+    local root="$1"
+    sed -n '/^ZOMBOID_JRE_DIR=/,/^fi$/p' "${SCRIPT}" \
+        | sed "s|^ZOMBOID_JRE_DIR=.*|ZOMBOID_JRE_DIR=\"${root}\"|" \
+        > "${root}.jsig.sh"
+    # A subshell so each case starts from a clean environment and an export in
+    # one cannot leak into the next.
+    ( unset LD_PRELOAD
+      # shellcheck source=/dev/null
+      . "${root}.jsig.sh" >/dev/null
+      printf '%s' "${LD_PRELOAD-}" )
+}
+
+check_preload() { # <description> <fake jre64 root> <expected path>
+    local got
+    got="$(load_jsig "$2")"
+    if [ "${got}" != "$3" ]; then
+        fail "$1 (got '${got}', want '$3')"
+        return
+    fi
+    case "${got}" in
+        /*) ;;
+        *) fail "$1 - not an absolute path ('${got}')"; return ;;
+    esac
+    if [ ! -f "${got}" ]; then
+        fail "$1 - exported a path that does not exist ('${got}')"
+        return
+    fi
+    ok "$1"
+}
+
+echo "libjsig is preloaded by absolute path, whichever layout the JRE ships"
+
+# Today's builds: a Zulu JRE with the modern layout and no amd64 directory.
+MODERN="${SANDBOX}/jre-modern"
+mkdir -p "${MODERN}/lib/server"
+: > "${MODERN}/lib/libjsig.so"
+: > "${MODERN}/lib/server/libjsig.so"
+check_preload "modern layout resolves lib/libjsig.so" "${MODERN}" "${MODERN}/lib/libjsig.so"
+
+# Build 41 shipped the Java 8 layout.
+LEGACY="${SANDBOX}/jre-legacy"
+mkdir -p "${LEGACY}/lib/amd64"
+: > "${LEGACY}/lib/amd64/libjsig.so"
+check_preload "B41 layout still resolves lib/amd64" "${LEGACY}" "${LEGACY}/lib/amd64/libjsig.so"
+
+# Some JDK builds carry it only beside the server VM.
+SERVERONLY="${SANDBOX}/jre-serveronly"
+mkdir -p "${SERVERONLY}/lib/server"
+: > "${SERVERONLY}/lib/server/libjsig.so"
+check_preload "server-only layout falls through to lib/server" \
+    "${SERVERONLY}" "${SERVERONLY}/lib/server/libjsig.so"
+
+# First boot, before SteamCMD has put the game files down. Exporting anything
+# here is what printed the preload error on a brand new server.
+echo "nothing is exported when the JRE is not there yet"
+EMPTY="${SANDBOX}/jre-absent"
+mkdir -p "${EMPTY}/lib"
+GOT="$(load_jsig "${EMPTY}")"
+if [ -z "${GOT}" ]; then ok "no game files, no LD_PRELOAD"; else fail "no game files, no LD_PRELOAD (got '${GOT}')"; fi
+
+# An LD_PRELOAD already in the environment must be kept, and joined without the
+# leading colon the old "${LD_PRELOAD}:${JSIG}" form produced when it was empty.
+echo "an existing LD_PRELOAD is appended to, not replaced"
+sed -n '/^ZOMBOID_JRE_DIR=/,/^fi$/p' "${SCRIPT}" \
+    | sed "s|^ZOMBOID_JRE_DIR=.*|ZOMBOID_JRE_DIR=\"${MODERN}\"|" > "${SANDBOX}/jsig-append.sh"
+GOT="$( LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2
+        # shellcheck source=/dev/null
+        . "${SANDBOX}/jsig-append.sh" >/dev/null
+        printf '%s' "${LD_PRELOAD}" )"
+WANT="/lib/x86_64-linux-gnu/libjemalloc.so.2:${MODERN}/lib/libjsig.so"
+if [ "${GOT}" = "${WANT}" ]; then ok "existing entry preserved"; else fail "existing entry preserved (got '${GOT}')"; fi
+
+GOT="$(load_jsig "${MODERN}")"
+case "${GOT}" in
+    :*) fail "no leading colon when LD_PRELOAD starts empty (got '${GOT}')" ;;
+    *)  ok "no leading colon when LD_PRELOAD starts empty" ;;
+esac
+
 
 [ "${FAILED}" -eq 0 ] && echo "PASS" || echo "FAILURES"
 exit "${FAILED}"
