@@ -80,6 +80,9 @@ jobs:
       - name: images/zomboid/start-zomboid.test.sh
         run: bash images/zomboid/start-zomboid.test.sh
 
+      - name: images/palworld/start-palworld.test.sh
+        run: bash images/palworld/start-palworld.test.sh
+
   # steamcmd_base builds on its own rather than as one leg of the big matrix.
   # The nine game images are FROM it, so they used to wait on `needs: build` -
   # the whole 19-tag matrix, java_26_ea and a Docker Hub timeout included. One
