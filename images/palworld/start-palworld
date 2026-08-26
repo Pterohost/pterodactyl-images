@@ -418,7 +418,10 @@ ready_probe() {
 }
 
 graceful_stop() {
-    [ -n "${CHILD}" ] && kill -0 "${CHILD}" 2>/dev/null || return
+    # `return 0`, not a bare `return`: a bare one hands back the status of the
+    # failed kill -0, so stopping an already-stopped server reported failure.
+    # Nothing reads it today, which is exactly why it would go unnoticed.
+    [ -n "${CHILD}" ] && kill -0 "${CHILD}" 2>/dev/null || return 0
 
     log "Stop requested - saving the world over RCON before shutting down."
     rcon_send "Save" >/dev/null 2>&1 || log "WARN: could not save over RCON; falling back to a plain stop."
@@ -442,6 +445,50 @@ graceful_stop() {
     if [ "${PAL_RUNTIME}" = "proton" ]; then
         wineserver -k 2>/dev/null || "${PROTON_DIR:-/opt/pterohost-proton}/files/bin/wineserver" -k 2>/dev/null || true
     fi
+
+    # Do not return while the game is still alive.
+    #
+    # Signalling is not stopping. Returning here ends the trap, `wait` returns,
+    # the script exits and PID 1 with it - but PalServer is still running for as
+    # long as it takes UE5 to unwind a loaded world. The nodes run containers on
+    # the host network stack, so its sockets stay bound fleet-wide until the
+    # process is actually reaped, and RCON's listen socket is the one that
+    # matters: Wings sees the container exit, starts it again, and the new
+    # PalServer cannot bind the RCON port because the old one still holds it.
+    # The game then comes up with RCON silently absent - no player list, no
+    # console, socket error 111 in the panel - and it stays that way until
+    # something stops the server long enough for the port to clear.
+    #
+    # That is exactly why Restart broke the console while Stop, wait for
+    # Offline, Start did not: the second path gives the old process time to die.
+    # Waiting out the exit here is what makes the two paths equivalent.
+    #
+    # The budget is sized against Wings, not picked freely: Wings force-kills
+    # the container `docker.timeouts.stop` seconds after asking it to stop (30
+    # on this fleet), and a force-kill tears the whole container down, which is
+    # safe but takes the shutdown out of our hands. So the three waits together
+    # - PAL_STOP_TIMEOUT for the RCON shutdown, then these two - must stay
+    # inside that, hence 25 + 3 + 2. Raise PAL_STOP_TIMEOUT for a world that
+    # needs longer only together with the Wings timeout, or the extra seconds
+    # are spent being killed rather than stopping.
+    waited=0
+    while [ "${waited}" -lt "${PAL_TERM_TIMEOUT:-3}" ]; do
+        kill -0 "${CHILD}" 2>/dev/null || { log "Server exited after SIGTERM."; return; }
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    log "Still running ${PAL_TERM_TIMEOUT:-3}s after SIGTERM - sending SIGKILL."
+    kill -KILL "${CHILD}" 2>/dev/null || true
+
+    waited=0
+    while [ "${waited}" -lt "${PAL_KILL_TIMEOUT:-2}" ]; do
+        kill -0 "${CHILD}" 2>/dev/null || { log "Server stopped."; return; }
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    log "WARN: PalServer survived SIGKILL for ${PAL_KILL_TIMEOUT:-2}s - leaving it to Wings; the next start may come up without RCON."
 }
 
 trap graceful_stop SIGTERM SIGINT
