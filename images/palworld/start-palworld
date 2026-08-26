@@ -506,6 +506,47 @@ trap graceful_stop SIGTERM SIGINT
 LAUNCHER=()
 [ "${PAL_RUNTIME}" = "proton" ] && LAUNCHER=(proton "${PAL_PROTON_VERB:-runinprefix}")
 
+# Wait for the RCON port to be genuinely free before starting the game.
+#
+# Making the stop path wait for the process to die removed the obvious half of
+# the restart race, but not all of it: Palworld binds its RCON socket without
+# SO_REUSEADDR, so a connection left over from the previous run in TIME_WAIT,
+# LAST-ACK or CLOSE-WAIT is enough to make the bind fail. The panel polls the
+# player list over RCON, so on a busy server there is nearly always such a
+# leftover, and those states hang around for up to a minute. Palworld does not
+# report the failure or retry - it just runs with no RCON at all, which is
+# indistinguishable to the owner from the server being broken.
+#
+# Measured on a live server (26.08.2026): with only the stop-side fix, pressing
+# Restart still lost RCON on two attempts out of four, and `ss` showed LAST-ACK
+# entries on the RCON port each time it failed.
+#
+# The containers share the host network namespace, so ss here sees exactly the
+# sockets that would block the bind. We wait them out rather than start into a
+# port we already know is unusable. The wait is bounded: after the timeout we
+# start anyway, because a server that is up without RCON still beats one that
+# never starts.
+wait_for_rcon_port() {
+    [ -n "${RCON_PORT:-}" ] || return 0
+    command -v ss >/dev/null 2>&1 || return 0
+
+    local waited=0 limit="${PAL_PORT_WAIT_TIMEOUT:-45}" lingering
+    while [ "${waited}" -lt "${limit}" ]; do
+        lingering="$(ss -Hant "( sport = :${RCON_PORT} )" 2>/dev/null | wc -l)"
+        [ "${lingering}" = "0" ] && {
+            [ "${waited}" -gt 0 ] && log "RCON port ${RCON_PORT} is free after ${waited}s."
+            return 0
+        }
+        [ "${waited}" = "0" ] && log "RCON port ${RCON_PORT} still has ${lingering} socket(s) from the previous run - waiting up to ${limit}s so RCON can bind."
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    log "WARN: RCON port ${RCON_PORT} was still busy after ${limit}s - starting anyway; the panel may show no player list until the next restart."
+}
+
+wait_for_rcon_port
+
 log "Starting Palworld on the ${PAL_RUNTIME} runtime (game ${SERVER_PORT}, query ${QUERY_PORT:-unset}, rcon ${RCON_PORT:-off}, rest ${REST_PORT:-off})."
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 

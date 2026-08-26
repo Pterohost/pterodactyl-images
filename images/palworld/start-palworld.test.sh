@@ -117,4 +117,60 @@ else
     fail "stopping an already-stopped server returned ${CHILD_DEAD_RC}"
 fi
 
+# --- the pre-launch wait on the RCON port ------------------------------------
+#
+# Second half of the same defect: even once the old process is gone, Palworld
+# binds RCON without SO_REUSEADDR, so a leftover socket on that port makes the
+# bind fail silently. What matters is that the wrapper does not launch into a
+# port it can already see is occupied, and that it still launches eventually.
+
+load_wait_fn() { # <sandbox>
+    sed -n '/^wait_for_rcon_port() {/,/^}$/p' "${SCRIPT}" > "$1/wait.sh"
+    # shellcheck source=/dev/null
+    . "$1/wait.sh"
+}
+load_wait_fn "${SANDBOX}"
+
+if ! command -v ss >/dev/null 2>&1; then
+    printf '  skip iproute2 (ss) unavailable - port-wait assertions skipped\n'
+else
+    RCON_PORT="${PROBE_PORT}"
+    PAL_PORT_WAIT_TIMEOUT=3
+
+    # Free port: must return at once.
+    START=${SECONDS}
+    wait_for_rcon_port
+    if [ $((SECONDS - START)) -le 1 ]; then
+        ok "free port is not waited on"
+    else
+        fail "waited on a port that was already free"
+    fi
+
+    # Occupied port: must not return before the timeout, and must return after.
+    if spawn_stubborn_child; then
+        START=${SECONDS}
+        wait_for_rcon_port
+        ELAPSED=$((SECONDS - START))
+        if [ "${ELAPSED}" -ge "${PAL_PORT_WAIT_TIMEOUT}" ]; then
+            ok "occupied port is waited on, then start proceeds anyway"
+        else
+            fail "returned after ${ELAPSED}s on an occupied port, expected >= ${PAL_PORT_WAIT_TIMEOUT}s"
+        fi
+        kill -KILL "${CHILD}" 2>/dev/null
+        CHILD=""
+    else
+        fail "test stub never came up for the port-wait check"
+    fi
+
+    # No RCON port configured at all must be a no-op, not a 45-second stall.
+    RCON_PORT=""
+    START=${SECONDS}
+    wait_for_rcon_port
+    if [ $((SECONDS - START)) -le 1 ]; then
+        ok "no RCON port configured is a no-op"
+    else
+        fail "stalled even though no RCON port is configured"
+    fi
+fi
+
 exit "${FAILED}"
