@@ -603,6 +603,23 @@ graceful_stop() {
 
     log "Still running after ${ZOMBOID_STOP_TIMEOUT:-90}s - escalating to SIGTERM."
     kill -TERM "${CHILD}" 2>/dev/null || true
+
+    # SIGTERM is regularly the end of the line rather than the end of the
+    # process: the JVM installs its own handler, and once the save thread is
+    # done the server can sit in a shutdown hook that never returns. Without a
+    # final stage this function simply exits with the child still alive, the
+    # panel shows "stopping" until Wings' own timeout expires, and Wings then
+    # SIGKILLs the container anyway - the same kill, minutes later, and after
+    # the owner has watched a restart hang. Reaching it here is not a harsher
+    # outcome, only a bounded one: the world was already written out by "quit"
+    # and the wait above before either signal was sent.
+    for _ in $(seq 1 "${ZOMBOID_KILL_TIMEOUT:-15}"); do
+        kill -0 "${CHILD}" 2>/dev/null || { log "Server exited after SIGTERM."; return; }
+        sleep 1
+    done
+
+    log "Ignored SIGTERM for ${ZOMBOID_KILL_TIMEOUT:-15}s - sending SIGKILL."
+    kill -KILL "${CHILD}" 2>/dev/null || true
 }
 
 trap graceful_stop SIGTERM SIGINT

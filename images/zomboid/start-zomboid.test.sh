@@ -226,5 +226,65 @@ case "${GOT}" in
 esac
 
 
+# graceful_stop must actually end the process. "quit" then SIGTERM was the whole
+# escalation, and the JVM ignores SIGTERM often enough that the function returned
+# with the child still running - the panel then showed "stopping" until Wings'
+# own timeout expired and Wings SIGKILLed the container. What is asserted here is
+# the property that matters to the owner: after graceful_stop returns, the child
+# is gone, whichever signal it chose to honour.
+echo "graceful_stop ends the process even when SIGTERM is ignored"
+
+sed -n '/^graceful_stop() {/,/^}$/p' "${SCRIPT}" > "${SANDBOX}/stop.sh"
+
+# Alive and not a zombie: a killed background job lingers as Z until reaped, and
+# kill -0 succeeds on a zombie, so it cannot answer this on its own.
+still_alive() {
+    local st
+    st="$(ps -p "$1" -o stat= 2>/dev/null | tr -d ' ')"
+    [ -n "${st}" ] && case "${st}" in Z*) return 1 ;; *) return 0 ;; esac
+    return 1
+}
+
+run_stop() {
+    # shellcheck source=/dev/null
+    ( log() { printf '%s\n' "$*"; }
+      exec 3>/dev/null
+      . "${SANDBOX}/stop.sh"
+      CHILD="$1" ZOMBOID_STOP_TIMEOUT=1 ZOMBOID_KILL_TIMEOUT=1
+      CHILD="$1" graceful_stop ) 2>/dev/null
+}
+
+# disown keeps bash from printing its own "Killed" job notice when the child is
+# SIGKILLed - that line reads like a test failure in CI output, and is not one.
+bash -c 'trap "" TERM INT; while :; do sleep 0.2; done' & STUBBORN=$!
+disown "${STUBBORN}" 2>/dev/null || true
+sleep 0.3
+run_stop "${STUBBORN}" >"${SANDBOX}/stubborn.log"
+if still_alive "${STUBBORN}"; then
+    fail "a child that ignores SIGTERM is killed"
+    kill -KILL "${STUBBORN}" 2>/dev/null || true
+else
+    ok "a child that ignores SIGTERM is killed"
+fi
+
+if grep -q 'SIGKILL' "${SANDBOX}/stubborn.log"; then
+    ok "the SIGKILL stage is reported in the log"
+else
+    fail "the SIGKILL stage is reported in the log"
+fi
+
+# The new stage must not fire when SIGTERM was enough - reaching SIGKILL every
+# time would be the same bug wearing the fix as a disguise.
+bash -c 'while :; do sleep 0.2; done' & POLITE=$!
+disown "${POLITE}" 2>/dev/null || true
+sleep 0.3
+run_stop "${POLITE}" >"${SANDBOX}/polite.log"
+if grep -q 'SIGKILL' "${SANDBOX}/polite.log"; then
+    fail "SIGKILL is not sent when SIGTERM already worked"
+else
+    ok "SIGKILL is not sent when SIGTERM already worked"
+fi
+
+
 [ "${FAILED}" -eq 0 ] && echo "PASS" || echo "FAILURES"
 exit "${FAILED}"
