@@ -579,6 +579,10 @@ For multi-arch the runner needs QEMU emulation (`docker run --privileged --rm to
 Pterodactyl ecosystem. This repository is the canonical home of the Docker images used across the
 fleet; outside contributions are welcome via pull requests.
 
+AI: Claude is USED in this project for:
+1) Commiting/CI automatization
+2) Code audits
+
 ## License
 
 MIT - see [LICENSE](LICENSE).
