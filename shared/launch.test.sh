@@ -117,5 +117,54 @@ check "non secret arguments still printed" "gm_flatgrass" \
 check "secret flag itself still visible" "+rcon_password" \
     "$(printf '%s' "${printed}" | grep -o '+rcon_password')"
 
+
+# --- retry: early transient failure --------------------------------------
+# The helper is opt-in and narrow on purpose; each case below is one of the
+# three ways it must refuse to retry.
+RETRY_LOG="$(mktemp)"
+fake_server() { # <attempts_before_success> <message>
+    local n; n=$(cat "${RETRY_LOG}" 2>/dev/null || echo 0)
+    n=$((n + 1)); printf '%s' "${n}" > "${RETRY_LOG}"
+    printf '%s\n' "$2"
+    [ "${n}" -gt "$1" ] && return 0
+    return 1
+}
+attempts() { cat "${RETRY_LOG}"; }
+
+export START_RETRY_PATTERN='Unable to initialize the game'
+export START_RETRY_GRACE=180
+export START_RETRY_DELAY=0
+
+printf '0' > "${RETRY_LOG}"; START_RETRIES=0 \
+    pterohost_run_with_retry fake_server 1 'Unable to initialize the game' >/dev/null 2>&1
+check "disabled by default: single attempt" "1" "$(attempts)"
+
+printf '0' > "${RETRY_LOG}"; START_RETRIES=3 \
+    pterohost_run_with_retry fake_server 2 'Unable to initialize the game' >/dev/null 2>&1
+check "transient error retried until success" "3" "$(attempts)"
+
+printf '0' > "${RETRY_LOG}"; START_RETRIES=3 \
+    pterohost_run_with_retry fake_server 9 'Unable to initialize the game' >/dev/null 2>&1
+check "retries are capped" "4" "$(attempts)"
+
+printf '0' > "${RETRY_LOG}"; START_RETRIES=3 \
+    pterohost_run_with_retry fake_server 9 'config.json is malformed' >/dev/null 2>&1
+check "unmatched error is not retried" "1" "$(attempts)"
+
+printf '0' > "${RETRY_LOG}"; START_RETRIES=3 START_RETRY_GRACE=0 \
+    pterohost_run_with_retry fake_server 9 'Unable to initialize the game' >/dev/null 2>&1
+check "late exit is a real crash, not retried" "1" "$(attempts)"
+
+printf '0' > "${RETRY_LOG}"; START_RETRIES=3 \
+    pterohost_run_with_retry fake_server 0 'Unable to initialize the game' >/dev/null 2>&1
+check "clean exit is never retried" "1" "$(attempts)"
+
+RETRY_OUT="$(printf '0' > "${RETRY_LOG}"; START_RETRIES=1 \
+    pterohost_run_with_retry fake_server 1 'Unable to initialize the game' 2>&1 | grep -c 'Unable to initialize')"
+check "console keeps streaming both attempts" "2" "${RETRY_OUT}"
+
+rm -f "${RETRY_LOG}"
+unset START_RETRY_PATTERN START_RETRY_GRACE START_RETRY_DELAY
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]
