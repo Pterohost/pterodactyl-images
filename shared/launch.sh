@@ -250,3 +250,64 @@ pterohost_swap_binary() {
     PTEROHOST_ARGS[0]="${replacement}"
     pterohost_log "Using ${replacement} instead of ${expected} for the selected branch."
 }
+
+# pterohost_run_with_retry <args...>
+#   Runs the command and retries it when it dies EARLY with output matching a
+#   known-transient pattern. Off by default: START_RETRIES unset or 0 means the
+#   caller keeps its own exec/wait path and nothing here runs.
+#
+#   Why this exists (ticket #757424, 2026-08-28). Arma Reforger asks Bohemia's
+#   backend for the mod list before it opens a socket, and a failed call is
+#   fatal: "Failed to fetch addon details from workshop API!" -> "Unable to
+#   initialize the game" -> exit. On a server with 105 mods that call failed on
+#   4 of 9 boots in one evening, and every failure looked to the owner like the
+#   server refusing to start for no reason. Nothing about the machine or the
+#   build was wrong; the next attempt usually worked.
+#
+#   Deliberately narrow, because a retry loop around a genuinely broken server
+#   is worse than a clean exit - it hides the error and burns the node:
+#     - only an exit within START_RETRY_GRACE seconds counts (a server that ran
+#       for an hour and then crashed is a real crash, Wings handles it);
+#     - only output matching START_RETRY_PATTERN counts (a bad config must still
+#       fail immediately and visibly);
+#     - at most START_RETRIES extra attempts, with linear backoff.
+#
+#   Variables (all from the egg, nothing hardcoded here):
+#     START_RETRIES       max extra attempts, 0 = disabled (default)
+#     START_RETRY_PATTERN extended regex matched against the tail of the output
+#     START_RETRY_GRACE   seconds; an exit later than this is never retried
+#     START_RETRY_DELAY   seconds of backoff, multiplied by the attempt number
+pterohost_run_with_retry() {
+    local retries="${START_RETRIES:-0}"
+    local pattern="${START_RETRY_PATTERN:-}"
+    local grace="${START_RETRY_GRACE:-180}"
+    local delay="${START_RETRY_DELAY:-10}"
+    local tail_file attempt=0 started elapsed status
+
+    tail_file="$(mktemp)"
+    # shellcheck disable=SC2064
+    trap "rm -f '${tail_file}'" RETURN
+
+    while :; do
+        started="${SECONDS}"
+        # The console has to keep streaming, so the output is teed rather than
+        # captured: the owner sees the boot live, and we keep only the tail for
+        # the pattern check.
+        "$@" > >(tee >(tail -c 65536 > "${tail_file}")) 2>&1
+        status=$?
+        elapsed=$(( SECONDS - started ))
+
+        [ "${attempt}" -lt "${retries}" ] || return "${status}"
+        [ "${status}" -ne 0 ] || return 0
+        if [ "${elapsed}" -ge "${grace}" ]; then
+            return "${status}"
+        fi
+        if [ -z "${pattern}" ] || ! grep -aqE "${pattern}" "${tail_file}" 2>/dev/null; then
+            return "${status}"
+        fi
+
+        attempt=$(( attempt + 1 ))
+        pterohost_log "Startup failed after ${elapsed}s on a known transient error; retry ${attempt}/${retries} in $(( delay * attempt ))s."
+        sleep "$(( delay * attempt ))"
+    done
+}

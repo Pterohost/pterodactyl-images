@@ -106,6 +106,18 @@ fi
 
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
+# Ретрай раннего падения по транзиентной ошибке. Выключен, пока egg не задаст
+# START_RETRIES: без него обе ветки ниже - ровно те, что были, включая exec.
+# Ветка exec отдаёт процессу PID 1, поэтому ретрай с ней несовместим по
+# построению - при включённой опции идём общим путём с ожиданием потомка.
+if [ "${START_RETRIES:-0}" -gt 0 ] 2>/dev/null; then
+    pterohost_run_with_retry "${PTEROHOST_ARGS[@]}" &
+    CHILD=$!
+    trap 'kill -'"${STOP_SIGNAL}"' "${CHILD}" 2>/dev/null' TERM INT
+    wait "${CHILD}"
+    exit $?
+fi
+
 # Остановка: часть игр дописывает мир только по SIGINT и игнорирует SIGTERM от
 # Wings. Сигнал выбирается переменной, потому что универсального нет.
 if [ "$STOP_SIGNAL" = "TERM" ] && [ -z "$LOG_FILE" ]; then
