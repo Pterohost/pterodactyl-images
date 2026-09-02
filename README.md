@@ -262,6 +262,20 @@ All of these replace third-party images the panel could not fix. Each is a
   against the Steam Runtime 3 container and `game/cs2.sh` expects it, so this
   starts from `registry.gitlab.steamos.cloud/steamrt/sniper/platform` with
   SteamCMD installed on top.
+- **`cs16`** - swaps the engine for ReHLDS after the app-90 install, and can add
+  Metamod and AMX Mod X on request. Both mod installs find the module **by
+  filename** in the unpacked archive rather than trusting a path: the metamod-r
+  release zip already carries an `addons/metamod/` prefix and names its module
+  `metamod_i386.so`, not `metamod.so`. `cstrike/liblist.gam` is the only thing
+  the engine reads to locate the game library, and it is written **only after
+  the target has been seen on disk** - a path that is not there is not a
+  degraded server, it is `Host_Error: Couldn't get DLL API from !`, exit 255,
+  and a line on the customer's volume that outlives every restart. If Metamod
+  cannot be installed the bootstrap says so and leaves `dlls/cs.so` in place, so
+  the server runs without plugins instead of not running at all; AMX Mod X is
+  skipped entirely in that case, since Metamod is what loads it. AMXX comes from
+  `amxmodx.org/latest.php` (`base` plus the `cstrike` modules) - the
+  `/release/<version>` paths are not stable URLs and 404.
 - **`sevendaystodie`** - 7DTD does not read stdin; it exposes a telnet control
   port. The image waits for that port (world generation takes minutes, so it
   polls instead of sleeping a fixed amount) and attaches a console bridge, which
