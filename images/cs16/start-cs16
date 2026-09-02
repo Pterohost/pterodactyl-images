@@ -70,47 +70,134 @@ cs16_install_rehlds() {
     rm -rf "$tmp"
 }
 
-cs16_install_metamod() {
-    [ "$INSTALL_METAMOD" = "1" ] || return 0
+# liblist.gam is the only place the engine looks to find the game library, and
+# it is the one file in this bootstrap that can make a server permanently
+# unstartable. So it is written from exactly one function, and only after the
+# target has been seen on disk. A dead path there is not a degraded server, it
+# is
+#     Host_Error: Couldn't get DLL API from !
+# and a container that exits 255 on every start, for ever, because the bad line
+# outlives the restart that was supposed to clear it. That is what the first
+# CS 1.6 customer got (server 4429, 2026-09-02): the Metamod archive carries an
+# addons/metamod/ prefix and names its module metamod_i386.so, both of which
+# this script used to guess wrong, and liblist.gam was rewritten anyway.
+CS16_METAMOD_SO=""
+
+cs16_set_gamedll() { # <path relative to the game dir>
+    local liblist="/home/container/${HLDS_GAME}/liblist.gam"
+    [ -f "$liblist" ] || return 0
+    grep -q "^gamedll_linux \"$1\"" "$liblist" && return 0
+    sed -i "s|^gamedll_linux.*|gamedll_linux \"$1\"|" "$liblist"
+    pterohost_log "liblist.gam: gamedll_linux -> $1"
+}
+
+# Metamod-r calls its module metamod_i386.so, not metamod.so. Accept either, and
+# look only one level down: what matters is the module the engine will load from
+# addons/metamod/, not a copy stranded somewhere below it.
+cs16_metamod_so() {
     local dir="/home/container/${HLDS_GAME}/addons/metamod"
-    [ -f "$dir/metamod.so" ] && return 0
+    find "$dir" -maxdepth 1 -type f \
+        \( -name 'metamod_i386.so' -o -name 'metamod.so' \) 2>/dev/null | head -n 1
+}
 
-    local url
-    url="$(cs16_github_asset theAsmodai/metamod-r 'metamod.*\.zip$')"
-    [ -z "$url" ] && { pterohost_log "сборка Metamod не найдена"; return 0; }
+cs16_install_metamod() {
+    local game="/home/container/${HLDS_GAME}"
+    local dir="${game}/addons/metamod"
 
-    pterohost_log "установка Metamod"
-    mkdir -p "$dir"
-    curl -fsSL "$url" -o /tmp/metamod.zip && unzip -oq /tmp/metamod.zip -d "$dir" || true
-    rm -f /tmp/metamod.zip
-
-    local plugins="/home/container/${HLDS_GAME}/liblist.gam"
-    if [ -f "$plugins" ] && ! grep -q 'addons/metamod/metamod.so' "$plugins"; then
-        sed -i 's|^gamedll_linux.*|gamedll_linux "addons/metamod/metamod.so"|' "$plugins"
+    if [ "$INSTALL_METAMOD" != "1" ]; then
+        # Also the un-poisoning path: a server that had Metamod and then turned
+        # it off must stop naming a plugin loader it no longer loads.
+        cs16_set_gamedll "dlls/cs.so"
+        return 0
     fi
+
+    local so
+    so="$(cs16_metamod_so)"
+    if [ -z "$so" ]; then
+        pterohost_log "установка Metamod"
+        local url tmp="/home/container/.metamod-tmp"
+        url="$(cs16_github_asset theAsmodai/metamod-r 'metamod.*\.zip$')"
+        if [ -z "$url" ]; then
+            pterohost_log "сборка Metamod не найдена"
+        else
+            rm -rf "$tmp" && mkdir -p "$tmp"
+            if curl -fsSL "$url" -o "$tmp/metamod.zip" && unzip -oq "$tmp/metamod.zip" -d "$tmp"; then
+                # Раскладка архива менялась между релизами - ищем файл, а не
+                # путь, ровно как в cs16_install_rehlds выше.
+                local src cfg
+                src="$(find "$tmp" -type f \( -name 'metamod_i386.so' -o -name 'metamod.so' \) | head -n 1)"
+                if [ -n "$src" ]; then
+                    mkdir -p "$dir"
+                    cp -f "$src" "${dir}/$(basename "$src")"
+                    cfg="$(find "$tmp" -type f -name 'config.ini' | head -n 1)"
+                    if [ -n "$cfg" ] && [ ! -f "${dir}/config.ini" ]; then
+                        cp -f "$cfg" "${dir}/config.ini"
+                    fi
+                else
+                    pterohost_log "в архиве Metamod нет модуля metamod_i386.so"
+                fi
+            else
+                pterohost_log "Metamod не скачался"
+            fi
+            rm -rf "$tmp"
+        fi
+        so="$(cs16_metamod_so)"
+    fi
+
+    if [ -z "$so" ]; then
+        pterohost_log "Metamod не установлен - запускаюсь на штатной библиотеке игры, плагины работать не будут"
+        cs16_set_gamedll "dlls/cs.so"
+        return 1
+    fi
+
+    CS16_METAMOD_SO="$so"
+    cs16_set_gamedll "addons/metamod/$(basename "$so")"
+}
+
+cs16_amxx_register() {
+    local plugins="/home/container/${HLDS_GAME}/addons/metamod/plugins.ini"
+    mkdir -p "$(dirname "$plugins")"
+    grep -qs 'amxmodx_mm_i386.so' "$plugins" 2>/dev/null \
+        || echo 'linux addons/amxmodx/dlls/amxmodx_mm_i386.so' >> "$plugins"
 }
 
 cs16_install_amxx() {
     [ "$INSTALL_AMXX" = "1" ] || return 0
-    local dir="/home/container/${HLDS_GAME}/addons/amxmodx"
-    [ -d "$dir/dlls" ] && return 0
+    local game="/home/container/${HLDS_GAME}"
 
-    pterohost_log "установка AMX Mod X"
-    mkdir -p "/home/container/${HLDS_GAME}/addons"
-    local url="https://www.amxmodx.org/release/amxmodx-1.9.0-base-linux.tar.gz"
-    if curl -fsSL "$url" -o /tmp/amxx.tar.gz; then
-        tar -xzf /tmp/amxx.tar.gz -C "/home/container/${HLDS_GAME}" || true
-        rm -f /tmp/amxx.tar.gz
-    else
-        pterohost_log "AMX Mod X не скачался"
+    # AMX Mod X - это плагин Metamod. Без Metamod его некому загрузить, а
+    # запись в plugins.ini только создала бы вид, что мод установлен.
+    if [ -z "$CS16_METAMOD_SO" ]; then
+        pterohost_log "AMX Mod X пропущен: его грузит Metamod, а Metamod не установлен"
         return 0
     fi
 
-    local metaplugins="/home/container/${HLDS_GAME}/addons/metamod/plugins.ini"
-    mkdir -p "$(dirname "$metaplugins")"
-    if ! grep -qs 'amxmodx_mm_i386.so' "$metaplugins" 2>/dev/null; then
-        echo 'linux addons/amxmodx/dlls/amxmodx_mm_i386.so' >> "$metaplugins"
+    if [ -f "${game}/addons/amxmodx/dlls/amxmodx_mm_i386.so" ]; then
+        cs16_amxx_register
+        return 0
     fi
+
+    pterohost_log "установка AMX Mod X"
+    # www.amxmodx.org/release/<конкретная версия> отдаёт 404: каталог релизов не
+    # является стабильным URL. latest.php - тот же редиректор, которым
+    # пользуется страница загрузки самого проекта. base - ядро AMXX, cstrike -
+    # модули csx/cstrike/fun, без которых не работает почти ни один плагин
+    # под CS 1.6.
+    local pkg tarball
+    for pkg in base cstrike; do
+        tarball="/tmp/amxx-${pkg}.tar.gz"
+        if ! { curl -fsSL "https://www.amxmodx.org/latest.php?version=1.10&os=linux&package=${pkg}" -o "$tarball" \
+                && tar -xzf "$tarball" -C "${game}"; }; then
+            pterohost_log "AMX Mod X: пакет ${pkg} не установился"
+        fi
+        rm -f "$tarball"
+    done
+
+    if [ ! -f "${game}/addons/amxmodx/dlls/amxmodx_mm_i386.so" ]; then
+        pterohost_log "AMX Mod X не установлен"
+        return 0
+    fi
+    cs16_amxx_register
 }
 
 cs16_install_rehlds
