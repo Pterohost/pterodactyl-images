@@ -65,17 +65,15 @@ assert_eq() { # <what> <expected> <actual>
 
 # ---------------------------------------------------------------- fixtures ---
 
-# A byte-for-byte stand-in for the published metamod-r release layout: the zip
-# root is addons/metamod/, and the module is metamod_i386.so.
-make_metamod_zip() { # <path>
+# A stand-in for the published Metamod-P release layout: the archive root is
+# addons/metamod/dlls/, and the module is metamod.so.
+make_metamod_archive() { # <path>
     local build="${SANDBOX}/mmbuild"
     rm -rf "${build}"
-    mkdir -p "${build}/addons/metamod"
-    printf 'ELF-stub metamod\n' > "${build}/addons/metamod/metamod_i386.so"
-    printf 'stub config\n'      > "${build}/addons/metamod/config.ini"
-    mkdir -p "${build}/example_plugin"
-    printf 'int main(){}\n'     > "${build}/example_plugin/meta_api.cpp"
-    ( cd "${build}" && zip -qr "$1" . )
+    mkdir -p "${build}/addons/metamod/dlls"
+    printf 'ELF-stub metamod\n' > "${build}/addons/metamod/dlls/metamod.so"
+    printf 'ELF-stub trace\n'   > "${build}/addons/metamod/dlls/trace_mm.so"
+    ( cd "${build}" && tar -c . | xz -c > "$1" )
     rm -rf "${build}"
 }
 
@@ -108,13 +106,13 @@ LIBLIST
 
 SANDBOX="$(mktemp -d)"
 GAME="${SANDBOX}/cstrike"
-MM_ZIP="${SANDBOX}/metamod.zip"
+MM_ARCHIVE="${SANDBOX}/metamod.tar.xz"
 AMXX_TGZ="${SANDBOX}/amxx.tar.gz"
 
 # Lift the shipped functions, retargeting only the container home.
 LIFTED="${SANDBOX}/lifted.sh"
 : > "${LIFTED}"
-for fn in cs16_set_gamedll cs16_metamod_so cs16_install_metamod cs16_amxx_register cs16_install_amxx; do
+for fn in cs16_elf_strings cs16_engine_is_loadable cs16_set_gamedll cs16_metamod_so cs16_install_metamod cs16_amxx_register cs16_install_amxx; do
     if ! sed -n "/^${fn}() {/,/^}$/p" "${SCRIPT}" | grep -q .; then
         printf 'FATAL: could not lift %s out of %s\n' "${fn}" "${SCRIPT}"
         exit 1
@@ -130,7 +128,7 @@ pterohost_log() { printf '    [log] %s\n' "$*"; }
 
 CURL_CALLS=0
 CURL_FAILS=0
-MM_URL="https://example.invalid/metamod-bin-1.3.0.149.zip"
+MM_URL="https://example.invalid/metamod-p-v1.21p109-linux_ubuntu1804.tar.xz"
 
 # Stand-in for the network. Serves the fixture matching the requested output
 # file; CURL_FAILS=1 turns every fetch into curl's exit 22 (HTTP 4xx/5xx).
@@ -145,7 +143,7 @@ curl() {
     CURL_CALLS=$((CURL_CALLS + 1))
     [ "${CURL_FAILS}" = "1" ] && return 22
     case "${out}" in
-        *metamod.zip) cp "${MM_ZIP}" "${out}" ;;
+        *metamod.tar.xz) cp "${MM_ARCHIVE}" "${out}" ;;
         *amxx-*.tar.gz) cp "${AMXX_TGZ}" "${out}" ;;
         *) return 22 ;;
     esac
@@ -153,7 +151,7 @@ curl() {
 
 cs16_github_asset() { [ "${CURL_FAILS}" = "1" ] && return 0; printf '%s' "${MM_URL}"; }
 
-make_metamod_zip "${MM_ZIP}"
+make_metamod_archive "${MM_ARCHIVE}"
 make_amxx_tarball "${AMXX_TGZ}"
 
 # ------------------------------------------------------------------- tests ---
@@ -167,10 +165,10 @@ CS16_METAMOD_SO=""
 INSTALL_METAMOD=1
 cs16_install_metamod
 
-if [ -f "${GAME}/addons/metamod/metamod_i386.so" ]; then
-    ok "metamod module lands at addons/metamod/metamod_i386.so"
+if [ -f "${GAME}/addons/metamod/dlls/metamod.so" ]; then
+    ok "metamod module lands at addons/metamod/dlls/metamod.so"
 else
-    fail "metamod module is not at addons/metamod/metamod_i386.so"
+    fail "metamod module is not at addons/metamod/dlls/metamod.so"
 fi
 if [ -e "${GAME}/addons/metamod/addons" ]; then
     fail "archive was unpacked into itself: addons/metamod/addons/ exists"
@@ -178,10 +176,9 @@ else
     ok "no nested addons/metamod/addons/ tree"
 fi
 assert_eq "liblist.gam names the module that was written" \
-    "addons/metamod/metamod_i386.so" "$(gamedll_linux)"
-assert_eq "config.ini came across too" "stub config" "$(cat "${GAME}/addons/metamod/config.ini" 2>/dev/null)"
+    "addons/metamod/dlls/metamod.so" "$(gamedll_linux)"
 assert_eq "CS16_METAMOD_SO is set for the AMXX gate" \
-    "${GAME}/addons/metamod/metamod_i386.so" "${CS16_METAMOD_SO}"
+    "${GAME}/addons/metamod/dlls/metamod.so" "${CS16_METAMOD_SO}"
 assert_gamedll_resolves "metamod installed"
 
 # 2. Second start must not re-download and must not disturb the layout.
@@ -229,13 +226,45 @@ CURL_FAILS=0
 
 # 6. Turning Metamod off must un-poison a volume that had it on.
 new_game_dir
-sed -i 's|^gamedll_linux.*|gamedll_linux "addons/metamod/metamod_i386.so"|' "${GAME}/liblist.gam"
+sed -i 's|^gamedll_linux.*|gamedll_linux "addons/metamod/dlls/metamod.so"|' "${GAME}/liblist.gam"
 CS16_METAMOD_SO=""
 INSTALL_METAMOD=0
 cs16_install_metamod
 assert_eq "INSTALL_METAMOD=0 restores the stock game library" \
     "dlls/cs.so" "$(gamedll_linux)"
 assert_gamedll_resolves "metamod turned off"
+
+# 7. The ReHLDS guard: an engine whose Steam symbol the shipped libsteam_api.so
+#    cannot satisfy must be rejected, or hlds dies inside dlopen with
+#    "Unable to load engine, image is corrupt" before printing anything.
+mk_elf() { # <path> <NUL-separated symbol names...>
+    local out="$1"; shift
+    : > "${out}"
+    for sym in "$@"; do printf '%s\0' "${sym}" >> "${out}"; done
+}
+# The real depot library: exports the Safe/Internal variants, NOT the plain one.
+mk_elf "${SANDBOX}/libsteam_api.so" SteamInternal_GameServer_Init SteamGameServer_InitSafe SteamAPI_Init
+mk_elf "${SANDBOX}/rehlds_engine.so" SteamGameServer_Init SteamAPI_Init
+mk_elf "${SANDBOX}/stock_engine.so"  SteamGameServer_InitSafe SteamAPI_Init
+
+if cs16_engine_is_loadable "${SANDBOX}/rehlds_engine.so"; then
+    fail "ReHLDS engine accepted although libsteam_api.so lacks SteamGameServer_Init"
+else
+    ok "ReHLDS engine rejected when libsteam_api.so cannot satisfy it"
+fi
+if cs16_engine_is_loadable "${SANDBOX}/stock_engine.so"; then
+    ok "stock engine accepted"
+else
+    fail "stock engine wrongly rejected"
+fi
+# The substring trap: SteamGameServer_InitSafe must not be read as a match for
+# SteamGameServer_Init. If it were, the broken engine would sail through.
+mk_elf "${SANDBOX}/libsteam_api.so" SteamGameServer_InitSafe
+if cs16_engine_is_loadable "${SANDBOX}/rehlds_engine.so"; then
+    fail "SteamGameServer_InitSafe was accepted as SteamGameServer_Init"
+else
+    ok "InitSafe is not mistaken for Init"
+fi
 
 if [ "${FAILED}" -ne 0 ]; then
     printf '\nFAILED\n'

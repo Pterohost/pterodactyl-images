@@ -34,9 +34,46 @@ cs16_github_asset() {
         | head -n 1
 }
 
+# NUL-delimited, so a match is exact. A plain grep for SteamGameServer_Init also
+# hits SteamGameServer_InitSafe, which is a different function - and that is
+# precisely the distinction this check exists to make.
+cs16_elf_strings() { tr '\0' '\n' < "$1" 2>/dev/null; }
+
+# ReHLDS links against SteamGameServer_Init. Valve's current app-90 depot ships
+# a libsteam_api.so that exports SteamGameServer_InitSafe and
+# SteamInternal_GameServer_Init but NOT that symbol, and every published ReHLDS
+# build from 3.11.0.767 to 3.15.0.896 needs it (checked 2026-09-02). hlds_linux
+# then dies inside dlopen with
+#     Error: engine_i486.so: undefined symbol: SteamGameServer_Init
+#     Unable to load engine, image is corrupt.
+# before the console prints anything at all. So the swap is verified before it
+# is kept: an engine the shipped Steam library cannot satisfy is not installed,
+# and the customer gets a working stock server plus a line saying why, instead
+# of a server that cannot boot.
+cs16_engine_is_loadable() { # <candidate engine .so>
+    local api="/home/container/libsteam_api.so" sym
+    [ -f "$api" ] || return 0
+    for sym in $(cs16_elf_strings "$1" | grep -x 'SteamGameServer_Init'); do
+        cs16_elf_strings "$api" | grep -qx "$sym" || return 1
+    done
+    return 0
+}
+
+cs16_engine_sig() { sha256sum /home/container/engine_i486.so 2>/dev/null | cut -d' ' -f1; }
+
 cs16_install_rehlds() {
     [ "$USE_REHLDS" = "1" ] || return 0
-    [ -f /home/container/.rehlds-${REHLDS_VERSION} ] && return 0
+
+    # The marker used to be a bare .rehlds-<version> touch file, which made the
+    # engine swap a once-ever action. pterohost_steam_update runs BEFORE this
+    # and, with VALIDATE=1, SteamCMD restores engine_i486.so from the depot - so
+    # the engine quietly reverted to stock on the second start and the marker
+    # then stopped it ever being re-applied. Key the state to the engine that is
+    # actually on disk instead: a restored depot file changes the digest and the
+    # swap runs again, while a settled engine (ReHLDS installed, or ReHLDS
+    # rejected as unloadable) short-circuits without touching the network.
+    local state="/home/container/.rehlds-state"
+    [ -f "$state" ] && [ "$(cat "$state" 2>/dev/null)" = "$(cs16_engine_sig)" ] && return 0
 
     local url
     url="$(cs16_github_asset dreamstalker/rehlds 'rehlds-bin.*\.zip$' "$REHLDS_VERSION")"
@@ -58,15 +95,23 @@ cs16_install_rehlds() {
     # Раскладка архива менялась между релизами, поэтому ищем файлы, а не путь.
     local engine
     engine="$(find "$tmp" -name 'engine_i486.so' | head -n 1)"
-    if [ -n "$engine" ]; then
-        cp -f "$engine" /home/container/${HLDS_GAME}/../engine_i486.so 2>/dev/null \
-            || cp -f "$engine" /home/container/engine_i486.so
-        pterohost_log "движок подменён на ReHLDS"
-        rm -f /home/container/.rehlds-* 2>/dev/null
-        touch "/home/container/.rehlds-${REHLDS_VERSION}"
-    else
+    if [ -z "$engine" ]; then
         pterohost_log "в архиве ReHLDS нет engine_i486.so, остаюсь на ванильном движке"
+        rm -rf "$tmp"
+        return 0
     fi
+
+    if ! cs16_engine_is_loadable "$engine"; then
+        pterohost_log "ReHLDS ${REHLDS_VERSION} не сходится с этой сборкой HLDS: движку нужен SteamGameServer_Init, которого нет в libsteam_api.so из депо 90. Остаюсь на ванильном движке - сервер запустится, но без ускорений ReHLDS."
+        rm -rf "$tmp"
+        cs16_engine_sig > "$state"
+        return 0
+    fi
+
+    cp -f "$engine" /home/container/engine_i486.so
+    pterohost_log "движок подменён на ReHLDS"
+    rm -f /home/container/.rehlds-* 2>/dev/null
+    cs16_engine_sig > "$state"
     rm -rf "$tmp"
 }
 
@@ -81,6 +126,22 @@ cs16_install_rehlds() {
 # CS 1.6 customer got (server 4429, 2026-09-02): the Metamod archive carries an
 # addons/metamod/ prefix and names its module metamod_i386.so, both of which
 # this script used to guess wrong, and liblist.gam was rewritten anyway.
+# Which Metamod, and why this one rather than the obvious one.
+#
+# Metamod-R exports its engine entry points with an ELF symbol version -
+# GiveFnptrsToDll@@METAMOD_ABI_1.0 - which only ReHLDS's loader resolves. On the
+# stock GoldSrc engine hlds prints
+#     Couldn't get GiveFnptrsToDll in
+#     Host_Error: Couldn't get DLL API from !
+# and exits 255, and the blank filename in that message sends you looking for a
+# missing file rather than an unresolvable symbol. Since ReHLDS itself cannot
+# currently be installed at all (see cs16_install_rehlds), Metamod-R means a
+# server that never starts.
+#
+# Metamod-P exports them unversioned and needs nothing newer than GLIBC 2.4, so
+# it loads on the stock engine and on ReHLDS alike. Measured on server 4429,
+# 2026-09-02: Metamod 1.21p109 + AMX Mod X 1.10.0.5479 loaded, Steam connected,
+# VAC secure mode active.
 CS16_METAMOD_SO=""
 
 cs16_set_gamedll() { # <path relative to the game dir>
@@ -91,18 +152,18 @@ cs16_set_gamedll() { # <path relative to the game dir>
     pterohost_log "liblist.gam: gamedll_linux -> $1"
 }
 
-# Metamod-r calls its module metamod_i386.so, not metamod.so. Accept either, and
-# look only one level down: what matters is the module the engine will load from
-# addons/metamod/, not a copy stranded somewhere below it.
+# Metamod-P puts the module in addons/metamod/dlls/, Metamod-R directly in
+# addons/metamod/ and calls it metamod_i386.so. Accept whichever is there - a
+# volume that already has one must not be re-installed over - and let the caller
+# write whatever path was found into liblist.gam.
 cs16_metamod_so() {
     local dir="/home/container/${HLDS_GAME}/addons/metamod"
-    find "$dir" -maxdepth 1 -type f \
-        \( -name 'metamod_i386.so' -o -name 'metamod.so' \) 2>/dev/null | head -n 1
+    find "$dir" -maxdepth 2 -type f \
+        \( -name 'metamod.so' -o -name 'metamod_i386.so' \) 2>/dev/null | head -n 1
 }
 
 cs16_install_metamod() {
     local game="/home/container/${HLDS_GAME}"
-    local dir="${game}/addons/metamod"
 
     if [ "$INSTALL_METAMOD" != "1" ]; then
         # Also the un-poisoning path: a server that had Metamod and then turned
@@ -116,25 +177,28 @@ cs16_install_metamod() {
     if [ -z "$so" ]; then
         pterohost_log "установка Metamod"
         local url tmp="/home/container/.metamod-tmp"
-        url="$(cs16_github_asset theAsmodai/metamod-r 'metamod.*\.zip$')"
+        # The ubuntu1804 asset is the portable one - its newest glibc reference
+        # is GLIBC_2.4 - and this image is Debian 12. The ubuntu2404 asset wants
+        # a glibc newer than the base has.
+        url="$(cs16_github_asset Bots-United/metamod-p 'linux_ubuntu1804.*\.tar\.xz$')"
+        [ -z "$url" ] && url="$(cs16_github_asset Bots-United/metamod-p 'linux.*\.tar\.xz$')"
         if [ -z "$url" ]; then
             pterohost_log "сборка Metamod не найдена"
         else
             rm -rf "$tmp" && mkdir -p "$tmp"
-            if curl -fsSL "$url" -o "$tmp/metamod.zip" && unzip -oq "$tmp/metamod.zip" -d "$tmp"; then
-                # Раскладка архива менялась между релизами - ищем файл, а не
-                # путь, ровно как в cs16_install_rehlds выше.
-                local src cfg
-                src="$(find "$tmp" -type f \( -name 'metamod_i386.so' -o -name 'metamod.so' \) | head -n 1)"
+            # xz -dc | tar -x rather than tar -J: the base image ships xz as a
+            # separate binary and tar's own -J is not wired to it.
+            if curl -fsSL "$url" -o "$tmp/metamod.tar.xz" \
+                && xz -dc "$tmp/metamod.tar.xz" | tar -x -C "$tmp"; then
+                # Найти файл, а не довериться пути - раскладка архивов Metamod
+                # менялась между сборками, ровно как у ReHLDS выше.
+                local src
+                src="$(find "$tmp" -type f -name 'metamod.so' | head -n 1)"
                 if [ -n "$src" ]; then
-                    mkdir -p "$dir"
-                    cp -f "$src" "${dir}/$(basename "$src")"
-                    cfg="$(find "$tmp" -type f -name 'config.ini' | head -n 1)"
-                    if [ -n "$cfg" ] && [ ! -f "${dir}/config.ini" ]; then
-                        cp -f "$cfg" "${dir}/config.ini"
-                    fi
+                    mkdir -p "${game}/addons/metamod/dlls"
+                    cp -f "$src" "${game}/addons/metamod/dlls/metamod.so"
                 else
-                    pterohost_log "в архиве Metamod нет модуля metamod_i386.so"
+                    pterohost_log "в архиве Metamod нет metamod.so"
                 fi
             else
                 pterohost_log "Metamod не скачался"
@@ -151,7 +215,7 @@ cs16_install_metamod() {
     fi
 
     CS16_METAMOD_SO="$so"
-    cs16_set_gamedll "addons/metamod/$(basename "$so")"
+    cs16_set_gamedll "${so#${game}/}"
 }
 
 cs16_amxx_register() {
