@@ -48,7 +48,7 @@ License: MIT
 | `satisfactory` | Satisfactory | `steamcmd_base` | amd64 | Steam app `1690800`. Query interfaces bound to all interfaces. |
 | `dayz` | DayZ | `steamcmd_base` | amd64 | Steam app `223350`, **authenticated depot**. Syncs `steamQueryPort`. |
 | `arma3` | Arma 3 | `steamcmd_base` | amd64 | Steam app `233780`, **authenticated depot**. |
-| `cs16` | Counter-Strike 1.6 (ReHLDS) | `steamcmd_base` | amd64 | Steam app `90`. ReHLDS engine swap, optional Metamod and AMX Mod X. |
+| `cs16` | Counter-Strike 1.6 (GoldSrc) | `steamcmd_base` | amd64 | Steam app `90`. Optional Metamod-P and AMX Mod X. ReHLDS swap declines itself on the current depot - see below. |
 | `source` | Source dedicated server (srcds) | `steamcmd_base` | amd64 | TF2, CS:S, DoD:S, HL2:DM, Left 4 Dead 2, Insurgency, Black Mesa. Game picked by `SRCDS_APPID` + `SRCDS_GAME`. Unlike the upstream egg, **slots are settable** (`MAX_PLAYERS`), plus tickrate, SourceTV and hidden GSLT/RCON. |
 | `terraria` | Terraria: vanilla, TShock, tModLoader | `ghcr.io/pelican-eggs/yolks:dotnet_9` | amd64 | Not a Steam app. Ships .NET 8 **and** 9 - TShock 6.1 needs 9, tModLoader is built for 8. Core picked by `TERRARIA_CORE`. |
 | `barotrauma` | Barotrauma dedicated server | `steamcmd_base` | amd64 | Steam app `1026340`. Writes the allocated port into `serversettings.xml` (root attributes) - upstream left every server on 27015. Caps players at the engine limit of 16. |
@@ -262,20 +262,40 @@ All of these replace third-party images the panel could not fix. Each is a
   against the Steam Runtime 3 container and `game/cs2.sh` expects it, so this
   starts from `registry.gitlab.steamos.cloud/steamrt/sniper/platform` with
   SteamCMD installed on top.
-- **`cs16`** - swaps the engine for ReHLDS after the app-90 install, and can add
-  Metamod and AMX Mod X on request. Both mod installs find the module **by
-  filename** in the unpacked archive rather than trusting a path: the metamod-r
-  release zip already carries an `addons/metamod/` prefix and names its module
-  `metamod_i386.so`, not `metamod.so`. `cstrike/liblist.gam` is the only thing
-  the engine reads to locate the game library, and it is written **only after
-  the target has been seen on disk** - a path that is not there is not a
-  degraded server, it is `Host_Error: Couldn't get DLL API from !`, exit 255,
-  and a line on the customer's volume that outlives every restart. If Metamod
-  cannot be installed the bootstrap says so and leaves `dlls/cs.so` in place, so
-  the server runs without plugins instead of not running at all; AMX Mod X is
-  skipped entirely in that case, since Metamod is what loads it. AMXX comes from
+- **`cs16`** - Counter-Strike 1.6 on the app-90 dedicated server, with optional
+  Metamod and AMX Mod X.
+
+  `cstrike/liblist.gam` names the shared object the engine loads as the game
+  library, and it is the one file here that can make a server permanently
+  unstartable, so it has a single writer and is written **only after the target
+  has been seen on disk**. A path that is not there is not a degraded server: it
+  is `Host_Error: Couldn't get DLL API from !`, exit 255, and a line on the
+  customer's volume that outlives every restart. Mod archives are searched for
+  the module **by filename** rather than trusted to unpack at a known path.
+
+  **Metamod-P, not Metamod-R, and that is deliberate.** Metamod-R exports its
+  entry points with an ELF symbol version (`GiveFnptrsToDll@@METAMOD_ABI_1.0`)
+  that only ReHLDS's loader resolves; on the stock engine hlds reports
+  `Couldn't get GiveFnptrsToDll in` with a *blank* filename, which reads like a
+  missing file and is not. Metamod-P exports them unversioned, needs nothing
+  newer than GLIBC 2.4, and loads on both engines. AMX Mod X comes from
   `amxmodx.org/latest.php` (`base` plus the `cstrike` modules) - the
-  `/release/<version>` paths are not stable URLs and 404.
+  `/release/<version>` paths are not stable URLs and 404 - and is skipped
+  outright when Metamod is absent, since Metamod is what loads it.
+
+  **`USE_REHLDS=1` is currently a no-op, on purpose.** Every published ReHLDS
+  build from 3.11.0.767 to 3.15.0.896 links against `SteamGameServer_Init`, and
+  the `libsteam_api.so` in Valve's current app-90 depot exports
+  `SteamGameServer_InitSafe` and `SteamInternal_GameServer_Init` but not that
+  symbol (checked 2026-09-02). Installing it gives `undefined symbol:
+  SteamGameServer_Init` / `Unable to load engine, image is corrupt` before the
+  console prints a line. The bootstrap now checks the depot's Steam library
+  against the candidate engine and declines the swap rather than shipping a
+  server that cannot boot. The check is keyed to a digest of the engine on disk,
+  not a touch file, because `VALIDATE=1` makes SteamCMD restore
+  `engine_i486.so` (and `liblist.gam`) from the depot on every start - the old
+  once-ever marker meant the swap silently un-did itself on the second start and
+  was never re-applied.
 - **`sevendaystodie`** - 7DTD does not read stdin; it exposes a telnet control
   port. The image waits for that port (world generation takes minutes, so it
   polls instead of sleeping a fixed amount) and attaches a console bridge, which
