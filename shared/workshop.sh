@@ -130,6 +130,56 @@ pterohost_mods_lowercase() {
     done
 }
 
+# pterohost_mods_fix_meta <dir> [<dir>...]
+#   Give every workshop mod a meta.cpp that names its own workshop id.
+#
+#   SteamCMD downloads meta.cpp exactly as the author uploaded it, and a fair
+#   number of authors publish theirs with `publishedid = 0` - the value the
+#   DayZ Tools publisher writes before the item has an id. A subscriber never
+#   sees it, because the game's own launcher rewrites the file locally; a
+#   server does, and it advertises that zero to clients.
+#
+#   What that costs, measured 2026-09-09 on DayZ service 7785: five mods out of
+#   48 carried a zero, so the mod list in the A2S rules reply carried five
+#   entries with no id. DZSA refuses the whole server with "The mod 'FBB Admin
+#   Gear' has a Steam Workshop ID of '0'", and the official launcher shows
+#   "the server could not send all data" plus an EMPTY required-mod list - so
+#   the server is unjoinable from both, while being perfectly healthy and
+#   answering A2S. Two of four modded DayZ servers on that node were affected.
+#
+#   The folder name IS the workshop id (that is how the sync writes them), so
+#   the repair needs no network. Only numeric @<id> directories qualify: a
+#   hand-installed @MyServerMod has no id to claim and is left alone.
+pterohost_mods_fix_meta() {
+    local dir base id meta
+
+    for dir in "$@"; do
+        [ -d "${dir}" ] || continue
+        base="$(basename "${dir}")"
+        id="${base#@}"
+
+        # Numeric-only. `case` avoids a grep per mod on a 50-mod server.
+        case "${id}" in
+            ''|*[!0-9]*) continue ;;
+        esac
+
+        meta="${dir}/meta.cpp"
+
+        if [ ! -f "${meta}" ]; then
+            printf 'protocol = 1;\npublishedid = %s;\nname = "%s";\n' "${id}" "${id}" > "${meta}" 2>/dev/null \
+                && pterohost_log "meta.cpp was missing for ${base} - created one."
+            continue
+        fi
+
+        grep -qE '^[[:space:]]*publishedid[[:space:]]*=[[:space:]]*0[[:space:]]*;' "${meta}" 2>/dev/null || continue
+
+        # In place, keeping name/timestamp: the launcher shows `name`, and the
+        # sync compares `timestamp` to decide whether the mod needs a redownload.
+        sed -i -E "s/^[[:space:]]*publishedid[[:space:]]*=[[:space:]]*0[[:space:]]*;/publishedid = ${id};/" "${meta}" 2>/dev/null \
+            && pterohost_log "${base}: meta.cpp said publishedid = 0 - set it to ${id} so launchers can list this mod."
+    done
+}
+
 # pterohost_workshop_remote_mtime <id>
 #   Last update of a workshop item, in epoch seconds, from its changelog page.
 #   Empty when Steam cannot be reached - the caller then leaves an installed mod

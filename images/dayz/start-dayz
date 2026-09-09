@@ -65,6 +65,17 @@ if [ "${MODS_LOWERCASE:-0}" = "1" ]; then
     done
 fi
 
+# A mod whose meta.cpp says `publishedid = 0` makes the server advertise that
+# zero in its mod list, and both DZSA and the official launcher then refuse to
+# build the list at all - the server is up, answers A2S, and is unjoinable.
+# Runs unconditionally and on every boot: the file comes back from Workshop
+# with the author's zero after every mod update, so a one-off repair does not
+# hold. See pterohost_mods_fix_meta for the incident this came from.
+if [ -n "${ALL_MODS}" ]; then
+    # shellcheck disable=SC2086
+    pterohost_mods_fix_meta $(printf '%s' "${ALL_MODS}" | tr ';' ' ' | sed 's#[^ ][^ ]*#/home/container/&#g')
+fi
+
 # ---------------------------------------------------------------------------
 # Keep serverDZ.cfg's ports in step with the panel's allocations.
 # ---------------------------------------------------------------------------

@@ -121,5 +121,48 @@ check "mod contents are lowercased" \
 check "the mod directory keeps its own name" \
     "yes" "$([ -d "${TMP}/@Mod" ] && echo yes || echo no)"
 
+# --- meta.cpp publishedid ------------------------------------------------
+# A publishedid of 0 is what an author's own meta.cpp carries when they never
+# filled it in. The subscriber's launcher rewrites the file locally, so only a
+# server ever sees the zero - and then advertises it, and BOTH launchers refuse
+# to parse the whole mod list. Measured 2026-09-09 on a 48-mod DayZ server:
+# DZSA answered "The mod 'FBB Admin Gear' has a Steam Workshop ID of '0'" and
+# the official launcher showed an EMPTY required-mod list on a server that was
+# up and answering A2S.
+mkdir -p "${TMP}/@3792546258" "${TMP}/@1559212036" "${TMP}/@Handmade" "${TMP}/@3730899494"
+printf 'protocol = 1;\npublishedid = 0;\nname = "FBB Admin Gear";\ntimestamp = 5250922604720454087;\n' \
+    > "${TMP}/@3792546258/meta.cpp"
+printf 'protocol = 1;\npublishedid = 1559212036;\nname = "CF";\ntimestamp = 42;\n' \
+    > "${TMP}/@1559212036/meta.cpp"
+printf 'protocol = 1;\npublishedid = 0;\nname = "Handmade";\n' \
+    > "${TMP}/@Handmade/meta.cpp"
+
+pterohost_mods_fix_meta "${TMP}/@3792546258" "${TMP}/@1559212036" "${TMP}/@Handmade" "${TMP}/@3730899494" >/dev/null
+
+check "publishedid = 0 is replaced by the folder id" \
+    "publishedid = 3792546258;" "$(grep publishedid "${TMP}/@3792546258/meta.cpp")"
+
+check "the mod name is preserved" \
+    'name = "FBB Admin Gear";' "$(grep name "${TMP}/@3792546258/meta.cpp")"
+
+# The sync compares timestamp to decide whether a mod needs redownloading -
+# rewriting the file must not cost that.
+check "the timestamp is preserved" \
+    "timestamp = 5250922604720454087;" "$(grep timestamp "${TMP}/@3792546258/meta.cpp")"
+
+check "a correct publishedid is left alone" \
+    "publishedid = 1559212036;" "$(grep publishedid "${TMP}/@1559212036/meta.cpp")"
+
+# A hand-installed mod has no workshop id to claim, and inventing one would
+# point every client at somebody else's item.
+check "a non-numeric mod directory is not touched" \
+    "publishedid = 0;" "$(grep publishedid "${TMP}/@Handmade/meta.cpp")"
+
+check "a missing meta.cpp is created with the folder id" \
+    "publishedid = 3730899494;" "$(grep publishedid "${TMP}/@3730899494/meta.cpp")"
+
+check "a mod directory that does not exist is skipped without error" \
+    "0" "$(pterohost_mods_fix_meta "${TMP}/@nope" >/dev/null 2>&1; echo $?)"
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

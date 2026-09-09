@@ -79,6 +79,15 @@ if [ "${MODS_LOWERCASE:-0}" = "1" ]; then
     done
 fi
 
+# Same defect as DayZ: an author who published meta.cpp with `publishedid = 0`
+# makes the server advertise a mod with no workshop id, and the launcher then
+# cannot offer the subscribe-and-join it exists for. Runs on every boot because
+# the next mod update brings the author's zero straight back.
+if [ -n "${ALL_MODS}" ]; then
+    # shellcheck disable=SC2086
+    pterohost_mods_fix_meta $(printf '%s' "${ALL_MODS}" | tr ';' ' ' | sed 's#[^ ][^ ]*#/home/container/&#g')
+fi
+
 # The base command, used only when the panel did not supply one (an egg that
 # still reads "start-arma3" and nothing else).
 args=(
