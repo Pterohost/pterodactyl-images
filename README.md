@@ -552,9 +552,20 @@ already resolves skips the whole block.
   (Windows-built mods, case-sensitive filesystem). Named mods uploaded over SFTP are left alone.
   `DISABLE_MOD_UPDATES=1` skips the sync and boots with what is on disk. A Steam outage is never
   fatal.
+- **The ids.** Every `@<numeric-id>` mod gets a `meta.cpp` that names its own workshop id, on every
+  boot. SteamCMD hands over the file exactly as the author uploaded it, and plenty of authors ship
+  `publishedid = 0` - the placeholder the publisher writes before an item has an id. A subscriber
+  never notices, because the game's launcher rewrites the file locally; a server does, and then
+  advertises the zero in its A2S mod list. One such entry and **both** launchers give up on the
+  whole list: DZSA refuses the server outright ("The mod '...' has a Steam Workshop ID of '0'") and
+  the official launcher shows "the server could not send all data" over an empty required-mod list,
+  on a server that is up and answering queries. Repairing it once does not hold - the next mod
+  update brings the author's zero straight back - so this runs unconditionally. Mod directories that
+  are not a bare workshop id (`@MyServerMod` uploaded over SFTP) have no id to claim and are skipped.
 
-`shared/workshop.test.sh` covers the list resolution, including the case that matters most: a
-missing `MOD_FILE` must warn on stderr, never into the list itself.
+`shared/workshop.test.sh` covers the list resolution and the `meta.cpp` repair, including the two
+cases that matter most: a missing `MOD_FILE` must warn on stderr, never into the list itself, and a
+non-numeric mod directory must never be given somebody else's workshop id.
 
 ## GC reference
 
