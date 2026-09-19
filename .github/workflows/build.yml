@@ -83,6 +83,9 @@ jobs:
       - name: images/palworld/start-palworld.test.sh
         run: bash images/palworld/start-palworld.test.sh
 
+      - name: images/plains-of-pain/start-plains-of-pain.test.sh
+        run: bash images/plains-of-pain/start-plains-of-pain.test.sh
+
       - name: images/cs16/start-cs16.test.sh
         run: bash images/cs16/start-cs16.test.sh
 
@@ -256,6 +259,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - tag: plains_of_pain
+            dir: plains-of-pain
           - tag: zomboid
             dir: zomboid
           - tag: palworld

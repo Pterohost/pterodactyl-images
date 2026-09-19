@@ -34,6 +34,7 @@ License: MIT
 | Tag | Runtime | Base | Arch | Notes |
 |---|---|---|---|---|
 | `steamcmd_base` | SteamCMD + tini + locales | debian:12-slim | amd64 | Shared base for the game images below. Not useful on its own. |
+| `plains_of_pain` | Plains of Pain (native Linux / Unity) | `steamcmd_base` | amd64 | Steam app `2227360`. Persistent JSON/worlds, two allocated UDP ports, SIGINT saves. [Runtime and NAT guide](images/plains-of-pain/README.md). |
 | `sbox` | s&box dedicated server (SteamCMD + Wine) | ubuntu:24.04 | amd64 | Steam app `1892930`, anonymous SteamCMD. See below. |
 | `rust` | RustDedicated (native Linux) | debian:12-slim | amd64 | Steam app `258550`, Oxide / Carbon / vanilla. See below. |
 | `zomboid` | Project Zomboid dedicated server | `steamcmd_base` | amd64 | Steam app `380870`. cgroup-aware JVM heap, RCON, save-on-stop. See below. |

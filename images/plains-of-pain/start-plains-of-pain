@@ -1,0 +1,136 @@
+#!/bin/bash
+# Configuration is JSON-first: this game applies JSON AFTER its CLI arguments.
+# The vendor's sample files are replaced by Steam updates and still carry an old
+# mapId. Our own file preserves additional keys and never moves existing worlds.
+set -u
+
+plains_error() { printf '[pterohost] ERROR: %s\n' "$*" >&2; return 1; }
+
+plains_configure() {
+    local file="$1" temp
+    export SERVER_NAME="${SERVER_NAME:-Pterohost Plains of Pain}"
+    export SERVER_PASSWORD="${SERVER_PASSWORD:-}"
+    export SERVER_PORT="${SERVER_PORT:-7777}" QUERY_PORT="${QUERY_PORT:-27016}"
+    export MAX_PLAYERS="${MAX_PLAYERS:-10}" WORLD_ID="${WORLD_ID:-1}"
+    export WORLD_SEED="${WORLD_SEED:-12345}" WORLD_SIZE="${WORLD_SIZE:-11}"
+    export MAP_ID="${MAP_ID:-1024}" DIFFICULTY="${DIFFICULTY:-1}"
+    export WORLD_NAMESPACE="${WORLD_NAMESPACE:-main}" ADMIN_ACCOUNT_IDS="${ADMIN_ACCOUNT_IDS:-}"
+    export PLAINS_SAVE_ROOT="${PWD}/data"
+    # Strict bounds avoid the game's unchecked byte/ushort casts, which can
+    # silently wrap a slot count or port into a completely different value.
+    jq -ne '
+      def number($s; $min; $max):
+        ($s | test("^[0-9]+$")) and (($s|tonumber) >= $min) and (($s|tonumber) <= $max);
+      env as $e |
+      number($e.SERVER_PORT;1;65535) and number($e.QUERY_PORT;1;65535) and
+      (($e.SERVER_PORT|tonumber) != ($e.QUERY_PORT|tonumber)) and
+      number($e.MAX_PLAYERS;1;200) and number($e.WORLD_ID;1;2147483647) and
+      number($e.WORLD_SEED;0;4294967295) and number($e.MAP_ID;0;65535) and
+      (["11","21","31","41","51"] | index($e.WORLD_SIZE) != null) and
+      (["0","1","2","3","4","255"] | index($e.DIFFICULTY) != null) and
+      ($e.WORLD_NAMESPACE | test("^[A-Za-z0-9_-]{1,64}$")) and
+      ($e.ADMIN_ACCOUNT_IDS == "" or
+        (($e.ADMIN_ACCOUNT_IDS | test("^[0-9]+(,[0-9]+)*$")) and
+         ([$e.ADMIN_ACCOUNT_IDS | split(",")[] | number(.;1;4294967295)] | all)))
+    ' >/dev/null || { plains_error 'Invalid ports, player limit, world settings or Steam Account IDs. Check the Startup settings.'; return 1; }
+    mkdir -p "$(dirname "$file")" "$PLAINS_SAVE_ROOT" || return 1
+    if [ -e "$file" ]; then
+        jq -e 'type == "object"' "$file" >/dev/null 2>&1 || {
+            plains_error "${file} must contain a valid JSON object; it has been left unchanged."; return 1;
+        }
+    else
+        printf '{}\n' > "$file" || return 1
+    fi
+    temp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
+    # The JSON key is rootNamespace, although the manual calls the CLI flag
+    # namespace. Empty password is null so the Steam password indicator clears.
+    # ttr=0 lets Wings own restarts; vendor samples quit after eight hours.
+    if ! jq 'env as $e | . + {
+      serverName:$e.SERVER_NAME, maxPlayers:($e.MAX_PLAYERS|tonumber),
+      port:($e.SERVER_PORT|tonumber), queryPort:($e.QUERY_PORT|tonumber),
+      worldId:($e.WORLD_ID|tonumber), seed:($e.WORLD_SEED|tonumber),
+      worldSize:($e.WORLD_SIZE|tonumber), mapId:($e.MAP_ID|tonumber),
+      difficulty:($e.DIFFICULTY|tonumber),
+      password:(if $e.SERVER_PASSWORD == "" then null else $e.SERVER_PASSWORD end),
+      userdir:$e.PLAINS_SAVE_ROOT, rootNamespace:$e.WORLD_NAMESPACE,
+      adminAccountIDs:$e.ADMIN_ACCOUNT_IDS, ttr:0
+    }' "$file" > "$temp"; then
+        rm -f "$temp"; return 1
+    fi
+    chmod 600 "$temp" && mv -f "$temp" "$file"
+}
+
+plains_stop() {
+    # Trap may run more than once when Docker and the panel signal together.
+    [ "${PLAINS_STOPPING:-0}" = 1 ] && return 0
+    PLAINS_STOPPING=1
+    printf '[pterohost] Saving the world and stopping Plains of Pain (SIGINT).\n'
+    kill -INT "$PLAINS_CHILD" 2>/dev/null || true
+    # Never exit while the game still owns the UDP ports. Unity handles SIGINT
+    # through Application.Quit and writes worlds before its process terminates.
+    wait "$PLAINS_CHILD" 2>/dev/null || true
+}
+
+plains_main() {
+    cd /home/container || return 1
+    . /usr/local/lib/pterohost/steam-update.sh
+    . /usr/local/lib/pterohost/launch.sh
+    export STEAMCMD_PLATFORM=linux
+    if [ "${AUTO_UPDATE:-1}" = 1 ] || [ ! -f PlainsOfPain.x86_64 ]; then
+        # This app's launch metadata is Windows-only despite its Linux depot.
+        # Explicit linux + no validate is proven; a requested validate is
+        # allowed and the shared updater retries without it on Steam's error.
+        pterohost_steam_update 2227360 "${SRCDS_BETAID:-}" "${VALIDATE:-0}" /home/container/PlainsOfPain.x86_64 || true
+    fi
+    [ -f PlainsOfPain.x86_64 ] || { plains_error 'Steam did not install the dedicated server. Retry installation before starting.'; return 1; }
+    chmod +x PlainsOfPain.x86_64 || return 1
+    mkdir -p "$HOME/.steam/sdk64" || return 1
+    # The depot contains the matching 64-bit Steam client, including when
+    # SteamCMD itself does not install linux64/steamclient.so.
+    [ ! -f steamclient.so ] || ln -sf /home/container/steamclient.so "$HOME/.steam/sdk64/steamclient.so"
+    export LD_LIBRARY_PATH="/home/container${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+    pterohost_panel_argv "$@"
+    if [ "$PTEROHOST_FROM_PANEL" != 1 ]; then
+        PTEROHOST_ARGS=(./PlainsOfPain.x86_64 -nographics -batchmode -ignorecompilererrors -logFile /dev/stdout -cc -config configs/pterohost.json)
+    fi
+    local config='' index arg
+    for ((index=1; index<${#PTEROHOST_ARGS[@]}; index++)); do
+        arg="${PTEROHOST_ARGS[$index]}"
+        if [ "$arg" = -config ]; then
+            config="${PTEROHOST_ARGS[$((index+1))]:-}"
+            break
+        fi
+    done
+    if [ -z "$config" ]; then
+        config=configs/pterohost.json
+        PTEROHOST_ARGS+=(-config "$config")
+    fi
+    config="$(realpath -m -- "$config")" || return 1
+    case "$config" in
+        /home/container/*) ;;
+        *) plains_error 'The server configuration must live inside /home/container.'; return 1 ;;
+    esac
+    plains_configure "$config" || return 1
+    pterohost_log "Settings: ${config}; worlds: data/${WORLD_NAMESPACE}; UDP game ${SERVER_PORT}, query ${QUERY_PORT}."
+    pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+    # Isolate the game process group. Unity installs its own SIGINT handler;
+    # the explicit saved stdin preserves panel input for custom launchers.
+    exec 3<&0
+    setsid "${PTEROHOST_ARGS[@]}" <&3 &
+    PLAINS_CHILD=$!
+    PLAINS_STOPPING=0
+    trap plains_stop SIGTERM SIGINT
+    local status=0
+    wait "$PLAINS_CHILD" || status=$?
+    if [ "$PLAINS_STOPPING" = 1 ]; then
+        wait "$PLAINS_CHILD" 2>/dev/null || true
+        status=0
+    fi
+    trap - SIGTERM SIGINT
+    return "$status"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    plains_main "$@"
+fi
