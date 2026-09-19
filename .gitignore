@@ -3,3 +3,7 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Hosting egg exports belong in the internal panel repository.
+/eggs/
+egg-*.json
