@@ -8,6 +8,10 @@ Registry: `ghcr.io/pterohost/pterodactyl-images`
 Architectures: `linux/amd64`, `linux/arm64`
 License: MIT
 
+This public repository contains Docker images, runtime code, and their documentation.
+Keep Pterodactyl egg exports in the internal panel repository; do not commit
+`eggs/` directories or `egg-*.json` exports here.
+
 ## Supported tags
 
 | Tag | Runtime | JDK | Default GC | Base | Status |
