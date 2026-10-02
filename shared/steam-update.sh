@@ -60,7 +60,7 @@ pterohost_steam_login_args() {
 # pterohost_steam_update <appid> <branch> <validate> <sentinel>
 #   sentinel: a path that must exist for the update to count as successful.
 pterohost_steam_update() {
-    local appid="$1" branch="${2:-}" validate="${3:-1}" sentinel="$4"
+    local appid="$1" branch="${2:-}" validate="${3:-1}" sentinel="$4" force_public="${5:-0}"
     local attempt=1 max_attempts="${STEAMCMD_ATTEMPTS:-3}"
     local branch_args=() validate_arg=() login_args=() platform_args=()
 
@@ -70,7 +70,9 @@ pterohost_steam_update() {
     while IFS= read -r arg; do login_args+=("${arg}"); done < <(pterohost_steam_login_args)
 
     case "${branch}" in
-        public|"") ;;                          # default branch takes no -beta
+        public|"")
+            [ "${force_public}" = "1" ] && branch_args=(-beta public)
+            ;;
         *)
             branch_args=(-beta "${branch}")
             # Закрытые ветки требуют пароль. Переменная SRCDS_BETAPASS есть в
@@ -120,6 +122,9 @@ pterohost_steam_update() {
         # written for exactly that case, turned out to be unreachable code.
         local failed=0
         grep -qiE "Failed to (install app|set beta)" "${log_file}" 2>/dev/null && failed=1
+        [ "${force_public}" = "1" ] \
+            && grep -qiE "Error! App '${appid}' state is 0x[[:xdigit:]]+ after update job" "${log_file}" 2>/dev/null \
+            && failed=1
 
         if [ "${failed}" -eq 0 ] && [ -e "${sentinel}" ]; then
             pterohost_log "SteamCMD update OK."
@@ -138,6 +143,7 @@ pterohost_steam_update() {
         # set beta 'x'", current ones fail the install with "(Missing
         # configuration)" - so both are matched.
         if [ -n "${branch}" ] && [ "${failed}" -eq 1 ] \
+            && { [ "${branch}" != "public" ] || [ "${force_public}" != "1" ]; } \
             && grep -qiE "Failed to set beta|Missing configuration" "${log_file}" 2>/dev/null; then
             pterohost_log "ERROR: Steam has no branch named '${branch}' for app ${appid} - nothing was downloaded."
             pterohost_log "       Check the branch variable in the panel. An empty value means the current stable release, which is what almost every server wants."
@@ -145,6 +151,7 @@ pterohost_steam_update() {
                 pterohost_log "       Falling back to the default branch so the server still comes up."
                 branch=""
                 branch_args=()
+                [ "${force_public}" = "1" ] && branch_args=(-beta public)
                 continue
             fi
             break
