@@ -44,7 +44,7 @@ Keep Pterodactyl egg exports in the internal panel repository; do not commit
 | `zomboid` | Project Zomboid dedicated server | `steamcmd_base` | amd64 | Steam app `380870`. cgroup-aware JVM heap, RCON, save-on-stop. See below. |
 | `palworld` | Palworld dedicated server | `steamcmd_base` | amd64 | Steam app `2394010`. RCON + REST API, perf flags. See below. |
 | `palworld_proton` | Palworld, **Windows depot under GE-Proton** | `steamcmd_base` | amd64 | Steam app `2394010`. Same bootstrap as `palworld` plus RE-UE4SS. **Slower than the native tag - take it only for mods.** See below. |
-| `gmod` | Garry's Mod (srcds) | `steamcmd_base` | amd64 | Steam app `4020`. **x86-64 branch by default**, RCON, strict port bind. |
+| `gmod` | Garry's Mod (srcds) | `steamcmd_base` | amd64 | Steam app `4020`. **x86-64 branch by default**, any branch via `SRCDS_BRANCH`, RCON, strict port bind. |
 | `gmod_classic` | Garry's Mod (srcds) | `ghcr.io/pterodactyl/games:source` | amd64 | Upstream image plus a `start-gmod` that runs the startup command verbatim. No image-side tuning - the compatibility fallback for `gmod`. |
 | `cs2` | Counter-Strike 2 | steamrt sniper | amd64 | Steam app `730`. On the official Steam Runtime 3 platform. |
 | `sevendaystodie` | 7 Days To Die | `steamcmd_base` | amd64 | Steam app `294420`. Telnet console bridge. |
@@ -245,9 +245,17 @@ All of these replace third-party images the panel could not fix. Each is a
 - **`gmod`** - runs the `x86-64` branch by default; it is not constrained by the
   32-bit address space, which is what a large workshop/addon load actually runs
   into. `USE_64BIT_BETA=0` returns to the 32-bit build for a server that needs a
-  32-bit-only binary module. Switching branch makes the next start re-download
-  the server files, and if the 64-bit depot does not land the bootstrap falls
-  back to `./srcds_run` rather than failing. jemalloc is preloaded on the
+  32-bit-only binary module. `SRCDS_BRANCH` picks the Steam branch outright:
+  `auto` (default - `x86-64` when `USE_64BIT_BETA=1`, otherwise `public`),
+  `public`, `x86-64`, `dev`, `prerelease`, `network_test`. `USE_64BIT_BETA` then
+  only chooses the binary: `srcds_run_x64` when the branch ships it, `srcds_run`
+  otherwise. `public` is requested explicitly (`-beta public`), because a bare
+  update keeps whatever beta the appmanifest already records - that is how
+  "64-bit off" used to leave servers on the x86-64 build. Switching branch makes
+  the next start re-download the server files. If the binary is missing while
+  the branch is already installed (deleted or renamed by hand), one `validate`
+  pass restores it instead of three empty retries; if it still does not land
+  the bootstrap falls back to `./srcds_run` rather than failing. jemalloc is preloaded on the
   64-bit build (`USE_JEMALLOC=0` to disable) and `SRCDS_THREADS` exposes the job
   system's pool size.
 
