@@ -33,38 +33,73 @@ cd /home/container || exit 1
 log() { pterohost_log "$@"; }
 
 APPID="${SRCDS_APPID:-4020}"
-BRANCH=""
+WANT64="${USE_64BIT_BETA:-1}"
 
-# The 64-bit build lives on a Steam beta branch (x86-64). It is the default
-# here: it is not constrained by the 32-bit address space, which is what a
+# Steam branch. SRCDS_BRANCH is a dropdown in the panel; "auto" (the default,
+# and what every server created before the variable existed resolves to) keeps
+# the old rule: USE_64BIT_BETA=1 -> x86-64, otherwise the stable release.
+# Any other value names the Steam branch directly, so a server can sit on dev
+# (daily builds - where HolyLib and other binary modules are built against)
+# or prerelease without the panel having to know about each one.
+#
+# The 64-bit build lives on its own branch (x86-64). It is the default for
+# "auto": it is not constrained by the 32-bit address space, which is what a
 # large addon/workshop load actually runs into, and it is measurably faster.
 # Set USE_64BIT_BETA=0 for a server that needs a 32-bit-only binary module.
 #
-# Note this changes which depot SteamCMD pulls, so the first start after
-# switching re-downloads the server files.
-if [ "${USE_64BIT_BETA:-1}" = "1" ]; then
-    BRANCH="x86-64"
-    BINARY="./srcds_run_x64"
+# Switching branch changes which depot SteamCMD pulls, so the first start
+# after a switch re-downloads the server files.
+REQ="$(printf '%s' "${SRCDS_BRANCH:-auto}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "${REQ}" in
+    ""|auto) if [ "${WANT64}" = "1" ]; then BRANCH="x86-64"; else BRANCH="public"; fi ;;
+    main|default|stable) BRANCH="public" ;;
+    public|x86-64|dev|prerelease|network_test) BRANCH="${REQ}" ;;
+    *)
+        log "WARN: unknown SRCDS_BRANCH '${SRCDS_BRANCH}' - using auto."
+        if [ "${WANT64}" = "1" ]; then BRANCH="x86-64"; else BRANCH="public"; fi
+        ;;
+esac
+
+# srcds_run is shipped by every branch, srcds_run_x64 only by the 64-bit
+# ones. Waiting for srcds_run_x64 on a branch that does not ship it would burn
+# every SteamCMD retry on each boot, so only x86-64 uses it as the sentinel.
+if [ "${WANT64}" = "1" ] && [ "${BRANCH}" = "x86-64" ]; then
     SENTINEL="/home/container/srcds_run_x64"
 else
-    BINARY="./srcds_run"
     SENTINEL="/home/container/srcds_run"
 fi
 
+# A switch back to public has to be asked for explicitly: without "-beta
+# public" SteamCMD keeps whatever beta the appmanifest already records, which
+# is how "64-bit off" used to leave a server on the x86-64 build.
+FORCE_PUBLIC=0
+[ "${BRANCH}" = "public" ] && FORCE_PUBLIC=1
+
+log "Steam branch: ${BRANCH} (SRCDS_BRANCH=${SRCDS_BRANCH:-auto}, USE_64BIT_BETA=${WANT64})."
+
 if [ "${AUTO_UPDATE:-1}" = "1" ]; then
-    pterohost_steam_update "${APPID}" "${BRANCH}" "${VALIDATE:-0}" "${SENTINEL}" || true
+    if ! pterohost_steam_update "${APPID}" "${BRANCH}" "${VALIDATE:-0}" "${SENTINEL}" "${FORCE_PUBLIC}"; then
+        # The appmanifest says the branch is installed, so a plain update has
+        # nothing to do - but the binary is gone (deleted or renamed by hand).
+        # Only validate brings it back; one pass, not another round of retries.
+        if [ "${VALIDATE:-0}" != "1" ] && [ ! -e "${SENTINEL}" ]; then
+            log "${SENTINEL} is missing although the branch is installed - re-checking files once (validate)."
+            STEAMCMD_ATTEMPTS=1 pterohost_steam_update "${APPID}" "${BRANCH}" 1 "${SENTINEL}" "${FORCE_PUBLIC}" || true
+        fi
+    fi
 else
     log "AUTO_UPDATE=0 - skipping SteamCMD."
     pterohost_steam_seed
     pterohost_steam_sdk
 fi
 
-# Fall back rather than fail: if the 64-bit depot did not land (a Steam hiccup,
-# or the branch is unavailable), the 32-bit binary from the existing install
-# still starts the server.
-if [ ! -x "${BINARY}" ]; then
-    log "WARN: ${BINARY} missing - falling back to ./srcds_run."
-    BINARY="./srcds_run"
+BINARY="./srcds_run"
+if [ "${WANT64}" = "1" ]; then
+    if [ -x ./srcds_run_x64 ]; then
+        BINARY="./srcds_run_x64"
+    else
+        log "WARN: branch ${BRANCH} has no srcds_run_x64 in this install - starting the 32-bit ./srcds_run."
+    fi
 fi
 
 # The base command, used only when the panel did not supply one (an egg that
