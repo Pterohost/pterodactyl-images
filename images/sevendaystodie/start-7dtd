@@ -37,7 +37,7 @@ BINARY="./7DaysToDieServer.x86_64"
 
 if [ "${AUTO_UPDATE:-1}" = "1" ]; then
     pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE:-0}" \
-        "/home/container/7DaysToDieServer.x86_64" || true
+        "/home/container/7DaysToDieServer.x86_64" 1 || true
 else
     log "AUTO_UPDATE=0 - skipping SteamCMD."
     pterohost_steam_seed
