@@ -153,8 +153,9 @@ pterohost_prune_empty_args "${PTEROHOST_ARGS[@]}"
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
 # Factorio сохраняет игру по SIGINT и игнорирует SIGTERM от Wings, поэтому
-# останов переводится в тот сигнал, который сервер понимает.
-"${PTEROHOST_ARGS[@]}" &
+# останов переводится в тот сигнал, который сервер понимает. <&0 сохраняет
+# консоль панели: фоновой команде bash иначе отдаёт stdin из /dev/null.
+"${PTEROHOST_ARGS[@]}" <&0 &
 CHILD=$!
 trap 'kill -INT "${CHILD}" 2>/dev/null' TERM INT
 wait "${CHILD}"

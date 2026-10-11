@@ -111,7 +111,7 @@ pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 # Ветка exec отдаёт процессу PID 1, поэтому ретрай с ней несовместим по
 # построению - при включённой опции идём общим путём с ожиданием потомка.
 if [ "${START_RETRIES:-0}" -gt 0 ] 2>/dev/null; then
-    pterohost_run_with_retry "${PTEROHOST_ARGS[@]}" &
+    pterohost_run_with_retry "${PTEROHOST_ARGS[@]}" <&0 &
     CHILD=$!
     trap 'kill -'"${STOP_SIGNAL}"' "${CHILD}" 2>/dev/null' TERM INT
     wait "${CHILD}"
@@ -120,11 +120,15 @@ fi
 
 # Остановка: часть игр дописывает мир только по SIGINT и игнорирует SIGTERM от
 # Wings. Сигнал выбирается переменной, потому что универсального нет.
+#
+# <&0 обязателен в обоих фоновых запусках: bash без job control отдаёт фоновой
+# команде stdin из /dev/null, и консоль панели перестаёт доходить до игры.
+# SCP:SL (STOP_SIGNAL=INT) так глотал !verify, list и любые команды LocalAdmin.
 if [ "$STOP_SIGNAL" = "TERM" ] && [ -z "$LOG_FILE" ]; then
     exec "${PTEROHOST_ARGS[@]}"
 fi
 
-"${PTEROHOST_ARGS[@]}" &
+"${PTEROHOST_ARGS[@]}" <&0 &
 CHILD=$!
 trap 'kill -'"${STOP_SIGNAL}"' "${CHILD}" 2>/dev/null' TERM INT
 wait "${CHILD}"
