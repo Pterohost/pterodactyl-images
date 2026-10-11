@@ -122,6 +122,50 @@ if [ "${PTEROHOST_FROM_PANEL}" != "1" ] && [ -n "${STARTUP_PARAMS:-}" ]; then
     PTEROHOST_ARGS+=(${STARTUP_PARAMS})
 fi
 
+# Headless clients. The egg has always published HC_NUM/HC_HIDE, but nothing
+# read them, so a mission with an HC slot ran every AI on the server's one
+# thread. Each HC is a second copy of the binary in client mode with the same
+# mods. They start before the server and keep retrying until it accepts them;
+# tini -g takes them down with the server.
+#
+# The server binds SERVER_IP, not loopback, so an HC connects from that address.
+# Arma hands an HC slot only to an address in headlessClients[] (and lifts the
+# bandwidth cap only for localClient[]), so that address goes into both.
+HC_COUNT="${HC_NUM:-0}"
+case "${HC_COUNT}" in ''|*[!0-9]*) HC_COUNT=0 ;; esac
+if [ "${HC_COUNT}" -gt 0 ]; then
+    HC_ADDR="${SERVER_IP:-127.0.0.1}"
+    [ "${HC_ADDR}" = "0.0.0.0" ] && HC_ADDR=127.0.0.1
+    if [ -f "${CFG}" ]; then
+        for key in headlessClients localClient; do
+            if grep -qE "^[[:space:]]*${key}\[\][[:space:]]*=" "${CFG}"; then
+                if ! grep -E "^[[:space:]]*${key}\[\][[:space:]]*=" "${CFG}" | grep -qF "\"${HC_ADDR}\""; then
+                    sed -i -E "s|^([[:space:]]*${key}\[\][[:space:]]*=[[:space:]]*\{)[[:space:]]*|\1 \"${HC_ADDR}\", |" "${CFG}"
+                    sed -i -E "s|^([[:space:]]*${key}\[\][[:space:]]*=[[:space:]]*\{ \"${HC_ADDR}\"), [[:space:]]*\}|\1 }|" "${CFG}"
+                fi
+            else
+                [ -n "$(tail -c1 "${CFG}")" ] && printf '\n' >> "${CFG}"
+                printf '%s[] = { "127.0.0.1", "%s" };\n' "${key}" "${HC_ADDR}" >> "${CFG}"
+            fi
+        done
+    fi
+    HC_PASS="$(cfg_get "${CFG}" password 2>/dev/null | tr -d '"')"
+    [ -z "${HC_PASS}" ] && HC_PASS="${SERVER_PASSWORD:-}"
+    mkdir -p ./serverprofile
+    for i in $(seq 1 "${HC_COUNT}"); do
+        hc=("./${BINARY}" -client "-connect=${HC_ADDR}" "-port=${SERVER_PORT}"
+            "-profiles=./serverprofile/hc${i}" "-name=HC${i}" -nosound)
+        [ -n "${HC_PASS}" ] && hc+=("-password=${HC_PASS}")
+        [ -n "${CLIENT_MODS}" ] && hc+=("-mod=${CLIENT_MODS}")
+        if [ "${HC_HIDE:-1}" = "1" ]; then
+            "${hc[@]}" > "./serverprofile/hc${i}.log" 2>&1 &
+        else
+            "${hc[@]}" 2>&1 | sed -u "s/^/[HC${i}] /" &
+        fi
+        log "Headless client ${i} -> ${HC_ADDR}:${SERVER_PORT}"
+    done
+fi
+
 log "Starting Arma 3 on ${SERVER_IP}:${SERVER_PORT} (query $((SERVER_PORT + 1)))."
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
