@@ -21,12 +21,15 @@ cd /home/container || exit 1
 . /usr/local/lib/pterohost/launch.sh
 # shellcheck source=/dev/null
 . /usr/local/lib/pterohost/workshop.sh
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/rpt-tee.sh
 
 log() { pterohost_log "$@"; }
 
 APPID="${STEAMCMD_APPID:-233780}"
 BINARY="${SERVER_BINARY:-arma3server_x64}"
 CFG="/home/container/server.cfg"
+RPT_DIR="/home/container/serverprofile/rpt"
 
 if [ "${UPDATE_SERVER:-1}" = "1" ]; then
     if [ -z "${STEAM_USER:-}" ] || [ "${STEAM_USER}" = "anonymous" ]; then
@@ -158,7 +161,13 @@ if [ "${HC_COUNT}" -gt 0 ]; then
         [ -n "${HC_PASS}" ] && hc+=("-password=${HC_PASS}")
         [ -n "${CLIENT_MODS}" ] && hc+=("-mod=${CLIENT_MODS}")
         if [ "${HC_HIDE:-1}" = "1" ]; then
-            "${hc[@]}" > "./serverprofile/hc${i}.log" 2>&1 &
+            if pterohost_rpt_enabled && pterohost_rpt_open "${RPT_DIR}" "hc${i}" "binary=${BINARY} hc=${i}"; then
+                ln -sfn "rpt/hc${i}-current.log" "./serverprofile/hc${i}.log" 2>/dev/null
+                "${hc[@]}" > >(pterohost_rpt_file "${RPT_DIR}" "hc${i}") 2>&1 &
+            else
+                [ -L "./serverprofile/hc${i}.log" ] && rm -f "./serverprofile/hc${i}.log"
+                "${hc[@]}" > "./serverprofile/hc${i}.log" 2>&1 &
+            fi
         else
             "${hc[@]}" 2>&1 | sed -u "s/^/[HC${i}] /" &
         fi
@@ -169,4 +178,11 @@ fi
 log "Starting Arma 3 on ${SERVER_IP}:${SERVER_PORT} (query $((SERVER_PORT + 1)))."
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-exec "${PTEROHOST_ARGS[@]}"
+# Also kept in serverprofile/rpt/ (shared/rpt-tee.sh, ticket 4626): the
+# console output survives the container, the server process and its exit code
+# stay exactly as with a bare exec.
+if pterohost_rpt_enabled; then
+    log "Server log is also kept in serverprofile/rpt/arma3-current.log (RPT_LOG=0 turns this off)."
+fi
+pterohost_rpt_exec "${RPT_DIR}" arma3 "binary=${BINARY} mods=$(printf '%s' "${ALL_MODS}" | tr ';' '\n' | grep -c .)" \
+    "${PTEROHOST_ARGS[@]}"
