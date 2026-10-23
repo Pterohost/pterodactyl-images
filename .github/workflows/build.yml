@@ -53,6 +53,9 @@ jobs:
       - name: shared/workshop.test.sh
         run: bash shared/workshop.test.sh
 
+      - name: shared/rpt-tee.test.sh
+        run: bash shared/rpt-tee.test.sh
+
       - name: shared/steam-update.test.sh
         run: bash shared/steam-update.test.sh
 
@@ -88,6 +91,9 @@ jobs:
 
       - name: images/cs16/start-cs16.test.sh
         run: bash images/cs16/start-cs16.test.sh
+
+      - name: images/rust/start-rust.test.sh
+        run: bash images/rust/start-rust.test.sh
 
   # steamcmd_base builds on its own rather than as one leg of the big matrix.
   # The nine game images are FROM it, so they used to wait on `needs: build` -

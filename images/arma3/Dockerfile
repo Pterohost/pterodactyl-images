@@ -19,6 +19,7 @@ ENV PTEROHOST_IMAGE=arma3 \
     PTEROHOST_NOTES="query port is gameport+1" \
     STEAMCMD_APPID=233780
 
+COPY --chmod=755 shared/rpt-tee.sh /usr/local/lib/pterohost/rpt-tee.sh
 COPY --chmod=755 images/arma3/start-arma3 /usr/local/bin/start-arma3
 
 USER container

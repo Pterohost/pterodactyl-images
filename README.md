@@ -326,7 +326,17 @@ All of these replace third-party images the panel could not fix. Each is a
   shared node usually belongs to a different customer.
 - **`arma3`** - Arma reserves `port..port+3` and answers Steam queries on `+1`,
   which the panel does not allocate; nothing to configure, but it explains why a
-  server can be invisible when the neighbouring port is taken.
+  server can be invisible when the neighbouring port is taken. The server's
+  console output (its RPT - Linux Arma writes it nowhere else) is also kept in
+  the volume under `serverprofile/rpt/`: `arma3-current.log` for the running
+  session, `arma3-YYYYmmdd-HHMMSS.log.gz` for earlier ones, each file opening
+  with a dated marker line. Rotated at every start and at `RPT_LOG_MAX_MB`
+  (default 8), `RPT_LOG_KEEP` archives kept (default 12); headless clients log
+  the same way as `hcN-*` (`serverprofile/hcN.log` stays as a link to the current
+  one). The server remains the bootstrap's foreground child with the same stdin,
+  process group and exit status as a bare `exec`; a full volume stops the copy,
+  never the console. `RPT_LOG=0` turns it off. `shared/rpt-tee.sh`, tested by
+  `shared/rpt-tee.test.sh`.
 
 `dayz` and `arma3` need `STEAM_USER`/`STEAM_PASS` - Bohemia gates those server
 depots behind an account that owns the game. Everything else installs
@@ -370,6 +380,17 @@ amd64 only - Facepunch publishes no arm64 depot. Per boot it:
   identity, map/seed/size or `MAP_URL`, tickrate, Rust+ `app.port` with public-IP
   auto-detect, `ADDITIONAL_ARGS` passthrough).
 
+**Update verdict.** "SteamCMD update OK." means SteamCMD said `Success!`, printed
+no error, and left the app manifest at `StateFlags 4`; the log names the build
+before and after. Anything else is logged as a failure with Steam's own reason
+(from `Steam/logs/content_log.txt` when it has one) and the server boots the
+build already on disk, saying so. A failure over corrupt or missing game files
+(`Read Failed`, `Corrupt game files`, `Missing game files`) is not transient:
+the half-applied staging in `steamapps/downloading/258550` is cleared and the
+update retried once with `validate`, after which the modding framework is
+re-applied even with `FRAMEWORK_UPDATE=0`, since `validate` restores Steam's
+own assemblies.
+
 Every network step is non-fatal: a transient CDN or Steam hiccup logs a warning
 and boots with existing files instead of leaving the server down.
 
@@ -380,7 +401,11 @@ bundles a pinned static [websocat](https://github.com/vi/websocat) and
 `start-rust` forwards each console line to the server's local WebRCON endpoint,
 echoing the command's reply back into the console. If RCON is not up yet,
 `quit` falls back to SIGTERM so a panel Stop still shuts the server down
-cleanly.
+cleanly. An end-of-file on stdin (a `^D` on the console, Wings dropping and
+re-attaching the stream) no longer ends the bridge, and should it die anyway
+it is restarted while the server runs - a dead bridge is what left Stop and
+Restart hanging in "stopping" with `quit` going nowhere.
+`images/rust/start-rust.test.sh` covers the bridge and the update verdict.
 
 s&box currently only ships an anonymously-installable build on the **Windows**
 depot; the native Linux depot returns `Missing configuration` from SteamCMD. So
@@ -560,6 +585,11 @@ already resolves skips the whole block.
   The two sources are additive and the result is sorted and de-duplicated, which is the order
   these servers have always run with. The bootstrap passes it as one `-mod=` argument.
   The egg cannot express this as a `{{VAR}}`: half of the list lives inside an uploaded HTML file.
+- **Update checks.** One `ISteamRemoteStorage/GetPublishedFileDetails` request (Steam Web API,
+  no key, 100 ids per request) returns `time_updated` for every installed workshop mod; the
+  changelog page is asked only for ids the API does not describe, or when the API is
+  unreachable. The page alone answered HTTP 429 after the first few mods (2026-10-17), which
+  froze every installed mod at its first download.
 - **The mods.** Anything missing is downloaded, anything Steam reports as newer than the local
   copy is refreshed, `.bikey` files land in `keys/`, and freshly downloaded content is lowercased
   (Windows-built mods, case-sensitive filesystem). Named mods uploaded over SFTP are left alone.
