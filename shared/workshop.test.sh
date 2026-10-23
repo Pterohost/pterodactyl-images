@@ -164,5 +164,82 @@ check "a missing meta.cpp is created with the folder id" \
 check "a mod directory that does not exist is skipped without error" \
     "0" "$(pterohost_mods_fix_meta "${TMP}/@nope" >/dev/null 2>&1; echo $?)"
 
+# --- update detection: Steam Web API first, changelog page as fallback ------
+# The changelog page answers 429 after a handful of requests (2026-10-17,
+# node03/node10), which froze every installed mod. The sync now asks
+# GetPublishedFileDetails once for the whole list and only goes to the page for
+# the ids the API did not describe. curl is stubbed: no network here.
+API_LOG="${TMP}/api.log"
+API_REPLY=""
+curl() {
+    printf '%s\n' "$*" >> "${API_LOG}"
+    [ -n "${API_REPLY}" ] || return 22
+    printf '%s' "${API_REPLY}"
+}
+
+: > "${API_LOG}"
+API_REPLY='{"response":{"result":1,"resultcount":3,"publishedfiledetails":[
+ {"publishedfileid":"111","result":1,"time_updated":1791897978},
+ {"publishedfileid":"222","result":9},
+ {"publishedfileid":"333","result":1,"time_updated":1700000000}]}}'
+check "the API reply is turned into id/epoch pairs, unknown items left out" \
+    "111 1791897978|333 1700000000" "$(pterohost_workshop_remote_mtimes 111 222 333 | paste -sd'|')"
+check "all ids go out in one request" \
+    "1" "$(grep -c 'itemcount=3' "${API_LOG}")"
+check "each id is posted as publishedfileids[n]" \
+    "yes" "$(grep -q 'publishedfileids\[0\]=111 -d publishedfileids\[1\]=222 -d publishedfileids\[2\]=333' "${API_LOG}" && echo yes || echo no)"
+
+: > "${API_LOG}"
+API_REPLY='{"response":{"result":1,"publishedfiledetails":[]}}'
+check "more than 100 ids are split into requests of 100" \
+    "itemcount=100|itemcount=100|itemcount=5" \
+    "$(pterohost_workshop_remote_mtimes $(seq 1000 1204) >/dev/null; grep -oE 'itemcount=[0-9]+' "${API_LOG}" | paste -sd'|')"
+
+API_REPLY=""
+check "an unreachable API yields nothing and still succeeds" \
+    "0:" "$(out="$(pterohost_workshop_remote_mtimes 111)"; echo "$?:${out}")"
+
+API_REPLY='<html>429 Too Many Requests</html>'
+check "a non-JSON reply yields nothing" \
+    "" "$(pterohost_workshop_remote_mtimes 111)"
+unset -f curl
+
+# The sync itself, lifted with /home/container pointed at a sandbox. Downloads
+# and the page fallback are recorded instead of performed.
+SYNC_HOME="${TMP}/home"
+mkdir -p "${SYNC_HOME}/@111" "${SYNC_HOME}/@333" "${SYNC_HOME}/@444" "${SYNC_HOME}/@Handmade"
+touch -d '@1750000000' "${SYNC_HOME}/@111" "${SYNC_HOME}/@333" "${SYNC_HOME}/@444"
+LIFTED="${TMP}/sync.sh"
+sed -n '/^pterohost_workshop_sync() {/,/^}$/p' "$(dirname "$0")/workshop.sh" \
+    | sed "s#/home/container#${SYNC_HOME}#g" > "${LIFTED}"
+. "${LIFTED}"
+SYNC_LOG="${TMP}/sync.log"
+pterohost_steam_seed() { :; }
+pterohost_workshop_download() { printf 'download %s\n' "$2" >> "${SYNC_LOG}"; }
+pterohost_workshop_remote_mtime() { printf 'page %s\n' "$1" >> "${SYNC_LOG}"; [ "$1" = 444 ] && echo 1800000000; return 0; }
+
+API_TIMES=$'111 1791897978\n333 1700000000'
+pterohost_workshop_remote_mtimes() { printf 'api %s\n' "$*" >> "${SYNC_LOG}"; printf '%s\n' "${API_TIMES}"; }
+: > "${SYNC_LOG}"
+pterohost_workshop_sync 221100 "@111;@333;@444;@555;@Handmade;" >/dev/null
+check "the API is asked once, for the installed workshop ids only" \
+    "api 111 333 444" "$(grep '^api' "${SYNC_LOG}")"
+check "a mod the API reports as newer is refreshed" \
+    "yes" "$(grep -qx 'download 111' "${SYNC_LOG}" && echo yes || echo no)"
+check "a mod the API reports as older is left alone" \
+    "no" "$(grep -qx 'download 333' "${SYNC_LOG}" && echo yes || echo no)"
+check "only the id the API did not describe goes to the changelog page" \
+    "page 444" "$(grep '^page' "${SYNC_LOG}" | paste -sd'|')"
+check "the page fallback still refreshes a newer mod" \
+    "yes" "$(grep -qx 'download 444' "${SYNC_LOG}" && echo yes || echo no)"
+check "a missing mod is downloaded without asking about updates" \
+    "yes" "$(grep -qx 'download 555' "${SYNC_LOG}" && echo yes || echo no)"
+
+API_TIMES=""
+: > "${SYNC_LOG}"
+check "an API outage falls back to the page for every installed mod and says so" \
+    "page 111|page 333|page 444|1" \
+    "$(pterohost_workshop_sync 221100 "@111;@333;@444;" | grep -c 'Steam Web API gave no update times' > "${TMP}/said"; grep '^page' "${SYNC_LOG}" | paste -sd'|' | tr -d '\n'; printf '|%s' "$(cat "${TMP}/said")")"
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]
