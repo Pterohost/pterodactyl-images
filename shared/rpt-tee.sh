@@ -158,12 +158,18 @@ pterohost_rpt_file() {
 #   redirection of the command: a `cmd > >(...)` substitution is created inside
 #   the forked command and cannot be waited for, and the last lines would race
 #   the container's exit.
+#
+#   TERM and HUP get a no-op handler, not an ignore: an ignored disposition
+#   would be inherited by the server across exec, a handler resets to default
+#   in it. The server still gets the group signal from tini -g, and this shell
+#   waits for its shutdown instead of dying first and taking tini with it.
 pterohost_rpt_exec() {
     local dir="$1" prefix="$2" marker="$3" status copy_fd copy_pid
     shift 3
     if pterohost_rpt_enabled && pterohost_rpt_open "${dir}" "${prefix}" "${marker}" \
         && exec {copy_fd}> >(pterohost_rpt_tee "${dir}" "${prefix}"); then
         copy_pid=$!
+        trap : TERM HUP
         "$@" >&"${copy_fd}" 2>&1 {copy_fd}>&-
         status=$?
         exec {copy_fd}>&-

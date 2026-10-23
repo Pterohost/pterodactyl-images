@@ -125,6 +125,41 @@ kill -INT -- "-${RP}"
 wait "${RP}"
 assert_eq "a server killed by SIGINT gives the same status as under a bare exec" "130" "$?"
 
+# 4c. docker stop, a daemon restart or a node reboot: SIGTERM to the group.
+# The bootstrap must outlive the server's shutdown, as a bare exec did, or tini
+# exits with it and the server is killed in the middle of saving.
+cat > "${SANDBOX}/term.sh" <<'SRV'
+#!/bin/bash
+trap 'echo "server: SIGTERM, saving world"; sleep 1; echo "server: saved on TERM"; exit 0' TERM
+echo ready
+while :; do sleep 0.05; done
+SRV
+chmod +x "${SANDBOX}/term.sh"
+D="${SANDBOX}/rpt4c"
+python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    bash "${SANDBOX}/run.sh" "${D}" "${SANDBOX}/term.sh" > "${SANDBOX}/console4c" 2>&1 &
+RP=$!
+for _ in $(seq 1 50); do grep -q ready "${SANDBOX}/console4c" 2>/dev/null && break; sleep 0.1; done
+kill -TERM -- "-${RP}"
+wait "${RP}"
+rc=$?
+assert_eq "SIGTERM to the group: the bootstrap waits and exits with the server's 0" "0" "${rc}"
+assert_eq "the TERM shutdown lines reach the console" "yes" "$(grep -q 'server: saved on TERM' "${SANDBOX}/console4c" && echo yes || echo no)"
+assert_eq "the TERM shutdown lines reach the file" "yes" "$(grep -q 'server: saved on TERM' "${D}/arma3-current.log" && echo yes || echo no)"
+
+# 4d. A server that does not handle SIGTERM dies of it: 128 + 15, as under a
+# bare exec, and the server must still get the signal (not inherit an ignore).
+python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    bash "${SANDBOX}/run.sh" "${SANDBOX}/rpt4d" "${SANDBOX}/plain.sh" > "${SANDBOX}/console4d" 2>&1 &
+RP=$!
+for _ in $(seq 1 50); do grep -q ready "${SANDBOX}/console4d" 2>/dev/null && break; sleep 0.1; done
+kill -TERM -- "-${RP}"
+t0=$(date +%s)
+wait "${RP}"
+rc=$?
+assert_eq "a server killed by SIGTERM gives the same status as under a bare exec" "143" "${rc}"
+assert_eq "the unhandled SIGTERM ends the server at once" "yes" "$([ $(( $(date +%s) - t0 )) -le 3 ] && echo yes || echo no)"
+
 # 5. The file side fails mid-run (a full volume). Console and server must not
 # notice beyond a warning.
 D="${SANDBOX}/rpt5"
