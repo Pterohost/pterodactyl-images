@@ -213,6 +213,44 @@ pterohost_workshop_remote_mtime() {
         | grep '<p id=' | head -1 | cut -d'"' -f2 | grep -E '^[0-9]+$'
 }
 
+# pterohost_workshop_remote_mtimes <id>...
+#   "<id> <epoch>" per line for every item the Steam Web API describes, from
+#   ISteamRemoteStorage/GetPublishedFileDetails - one POST per 100 items, no API
+#   key. This is the primary source; the changelog page above is only the
+#   fallback for ids missing here.
+#
+#   The page stopped being enough: on 2026-10-17 node03 and node10 got HTTP 429
+#   from it even with the browser UA once the first few mods of a list had been
+#   asked for, so every later mod logged "could not read its Steam changelog" and
+#   DayZ/Arma servers kept stale copies while every client had the update
+#   (ticket 4714: DayZ 1.30, `Can't compile "World" script module!`). The Web
+#   API answers the whole list in one request and reports time_updated directly.
+#   An item it cannot describe (result != 1: removed, private, unknown) is left
+#   out, so the caller falls back to the page for exactly those.
+PTEROHOST_WORKSHOP_API="${PTEROHOST_WORKSHOP_API:-https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/}"
+
+pterohost_workshop_remote_mtimes() {
+    [ "$#" -gt 0 ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local ids=("$@") start=0 i
+    local chunk=() form=()
+    while [ "${start}" -lt "${#ids[@]}" ]; do
+        chunk=("${ids[@]:${start}:100}")
+        form=(-d "itemcount=${#chunk[@]}")
+        for i in "${!chunk[@]}"; do
+            form+=(-d "publishedfileids[${i}]=${chunk[${i}]}")
+        done
+        curl -sf --max-time 30 "${form[@]}" "${PTEROHOST_WORKSHOP_API}" 2>/dev/null \
+            | jq -r '.response.publishedfiledetails[]?
+                     | select(.result == 1 and (.time_updated | type) == "number" and .time_updated > 0)
+                     | "\(.publishedfileid) \(.time_updated)"' 2>/dev/null \
+            | grep -E '^[0-9]+ [0-9]+$'
+        start=$((start + 100))
+    done
+    return 0
+}
+
 # pterohost_workshop_download <game_appid> <id>
 #   One item, with the same retry budget as the server update.
 pterohost_workshop_download() {
@@ -287,6 +325,19 @@ pterohost_workshop_sync() {
 
     pterohost_log "Checking Steam Workshop mods for updates..."
 
+    local installed=() api_times=""
+    while IFS= read -r entry; do
+        id="${entry#@}"
+        case "${id}" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        [ -d "/home/container/@${id}" ] && installed+=("${id}")
+    done < <(printf '%s\n' "${list}" | tr ';' '\n')
+    if [ "${#installed[@]}" -gt 0 ]; then
+        api_times="$(pterohost_workshop_remote_mtimes "${installed[@]}")"
+        [ -n "${api_times}" ] || pterohost_log "Steam Web API gave no update times - asking each mod's changelog page instead."
+    fi
+
     printf '%s' "${list}" | tr ';' '\n' | grep -v '^$' | while IFS= read -r entry; do
         id="${entry#@}"
 
@@ -302,7 +353,8 @@ pterohost_workshop_sync() {
             continue
         fi
 
-        remote_mtime="$(pterohost_workshop_remote_mtime "${id}")"
+        remote_mtime="$(printf '%s\n' "${api_times}" | awk -v id="${id}" '$1 == id { print $2; exit }')"
+        [ -n "${remote_mtime}" ] || remote_mtime="$(pterohost_workshop_remote_mtime "${id}")"
 
         # Say so. An unanswerable update check looks exactly like "this mod is
         # current", and that silence is what hid a permanently dead refresh path
