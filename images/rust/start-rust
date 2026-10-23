@@ -77,6 +77,114 @@ if [ "${FRAMEWORK}" != "oxide" ] && { [ "${LAST_FW}" = "oxide" ] || ls "${MANAGE
     FORCE_VALIDATE=1
 fi
 
+# rust_steam_update <steamcmd.sh> <validate 0|1> [branch args...]
+#   Runs app_update and decides from what SteamCMD itself reported whether it
+#   worked. The old check was "RustDedicated exists", which is true on every boot
+#   after the first, so a failed update printed "SteamCMD update OK." and the
+#   server came up on the previous build: ticket 4038 (node03, Carbon) sat on
+#   buildid 25902425 / protocol 2634 after Facepunch shipped 26139947 / 2635, and
+#   tickets 4683/4785 (node12) on 25823813 - nobody could join with a current
+#   client. SteamCMD's console says "Error! App ... state is 0x... after update
+#   job" or "ERROR! Failed to install app", and Steam/logs/content_log.txt says
+#   why ("Failed updating depot 258552 ... (Read Failed) (Corrupt game files)
+#   .../Managed/System.Data.dll", "(Missing game files)"). Success needs the
+#   "Success! App ..." line, no error line, and an app manifest that reads
+#   StateFlags 4 (fully installed, nothing pending).
+#
+#   Corrupt or missing files are not transient: the delta patch is computed
+#   against a file that no longer matches (Oxide's patcher, a plugin, a disk
+#   hiccup) and every plain retry fails the same way. That case gets one retry
+#   with `validate` after the half-applied staging in steamapps/downloading is
+#   cleared - the same two steps that fixed 4038 and 4683 by hand. validate
+#   restores Steam's own assemblies, so RUST_VALIDATED=1 tells the framework
+#   step below to re-apply Oxide/Carbon even with FRAMEWORK_UPDATE=0.
+rust_manifest_field() { # <key>
+    sed -n -E "s/^[[:space:]]*\"$1\"[[:space:]]+\"([^\"]*)\".*/\\1/p" \
+        "/home/container/steamapps/appmanifest_${APPID}.acf" 2>/dev/null | head -n 1
+}
+
+rust_steam_failure() { # <console log> <content log segment> -> reason on stdout, 0 if failed
+    local out="$1" content="$2" error flags cause
+    error="$(grep -m 1 -E "ERROR! |Error! App '${APPID}' state is" "${out}" 2>/dev/null)"
+    flags="$(rust_manifest_field StateFlags)"
+    if [ -z "${error}" ] && grep -qE "Success! App '${APPID}' (fully installed|already up to date)" "${out}" 2>/dev/null \
+        && { [ -z "${flags}" ] || [ "${flags}" = "4" ]; }; then
+        return 1
+    fi
+    cause="$(grep -m 1 -iE "Failed updating depot|update canceled" "${content}" 2>/dev/null)"
+    if [ -n "${cause}" ]; then
+        printf '%s\n' "${cause#*] }"
+    elif [ -n "${error}" ]; then
+        printf '%s\n' "${error}"
+    elif [ -n "${flags}" ] && [ "${flags}" != "4" ]; then
+        printf 'app manifest StateFlags %s after the update (4 = fully installed)\n' "${flags}"
+    else
+        printf 'SteamCMD did not report success\n'
+    fi
+    return 0
+}
+
+rust_steam_update() { # <steamcmd.sh> <validate 0|1> [branch args...]
+    local steamcmd="$1" validate="$2"; shift 2
+    local branch_args=("$@") validate_arg=() attempt=1 max_attempts="${STEAMCMD_ATTEMPTS:-3}"
+    local out content content_log="/home/container/Steam/logs/content_log.txt"
+    local before after offset rc reason="" retried=0
+    [ "${validate}" -gt 0 ] && validate_arg=(validate)
+    out="$(mktemp "${TMPDIR:-/tmp}/steamcmd.XXXXXX")"
+    content="$(mktemp "${TMPDIR:-/tmp}/content.XXXXXX")"
+    before="$(rust_manifest_field buildid)"
+
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        log "SteamCMD attempt ${attempt}/${max_attempts}${validate_arg[*]:+ (validate)}..."
+        offset="$(stat -c %s "${content_log}" 2>/dev/null || echo 0)"
+        timeout "${STEAMCMD_TIMEOUT:-1800}" "${steamcmd}" \
+            +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
+            +force_install_dir /home/container \
+            +login anonymous \
+            +app_update "${APPID}" "${branch_args[@]}" "${validate_arg[@]}" \
+            +quit 2>&1 | tee "${out}"
+        rc="${PIPESTATUS[0]}"
+        if [ "$(stat -c %s "${content_log}" 2>/dev/null || echo 0)" -lt "${offset}" ]; then offset=0; fi
+        tail -c "+$((offset + 1))" "${content_log}" > "${content}" 2>/dev/null || : > "${content}"
+
+        if ! reason="$(rust_steam_failure "${out}" "${content}")"; then
+            after="$(rust_manifest_field buildid)"
+            if [ -n "${before}" ] && [ "${before}" = "${after}" ]; then
+                log "SteamCMD update OK - already on the latest build ${after}."
+            else
+                log "SteamCMD update OK - build ${before:-none} -> ${after:-unknown}."
+            fi
+            rm -f "${out}" "${content}"
+            return 0
+        fi
+        [ "${rc}" = "124" ] && reason="timed out after ${STEAMCMD_TIMEOUT:-1800}s; ${reason}"
+        log "SteamCMD attempt ${attempt} FAILED (exit ${rc}): ${reason}"
+
+        if [ "${retried}" = "0" ] && grep -qiE "Corrupt game files|Read Failed|Missing game files" "${out}" "${content}" 2>/dev/null; then
+            retried=1
+            validate_arg=(validate)
+            RUST_VALIDATED=1
+            if [ -d "/home/container/steamapps/downloading/${APPID}" ]; then
+                log "Clearing the half-applied update in steamapps/downloading/${APPID}."
+                rm -rf "/home/container/steamapps/downloading/${APPID:?}"
+            fi
+            log "Game files do not match what the update expects - retrying once with validate."
+            continue
+        fi
+        attempt=$((attempt + 1))
+        [ "${attempt}" -le "${max_attempts}" ] && sleep "${STEAMCMD_RETRY_SLEEP:-5}"
+    done
+
+    rm -f "${out}" "${content}"
+    if [ -x /home/container/RustDedicated ]; then
+        log "WARN: SteamCMD update FAILED (${reason}) - starting the build already on disk (buildid $(rust_manifest_field buildid))."
+        log "WARN: if Facepunch released a newer build, current game clients cannot join until an update succeeds."
+    else
+        log "WARN: RustDedicated missing after ${max_attempts} attempts (${reason}) - continuing with existing files."
+    fi
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # 1. Update / validate RustDedicated via anonymous SteamCMD.
 # ---------------------------------------------------------------------------
@@ -101,21 +209,7 @@ if [ "${AUTO_UPDATE:-1}" = "1" ] || [ "${FORCE_VALIDATE}" = "1" ]; then
     # so the real update starts from a settled SteamCMD.
     "${STEAMCMD_RUN}/steamcmd.sh" +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 +quit >/dev/null 2>&1 || true
 
-    rust_present() { [ -x /home/container/RustDedicated ]; }
-    attempt=1; max_attempts=3
-    while [ "${attempt}" -le "${max_attempts}" ]; do
-        log "SteamCMD attempt ${attempt}/${max_attempts}..."
-        timeout "${STEAMCMD_TIMEOUT:-1800}" "${STEAMCMD_RUN}/steamcmd.sh" \
-            +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
-            +force_install_dir /home/container \
-            +login anonymous \
-            +app_update "${APPID}" "${branch_args[@]}" "${validate_arg[@]}" \
-            +quit || true
-        rust_present && { log "SteamCMD update OK."; break; }
-        log "attempt ${attempt} did not produce RustDedicated (transient?); retrying..."
-        attempt=$((attempt + 1)); sleep 5
-    done
-    rust_present || log "WARN: RustDedicated missing after ${max_attempts} attempts - continuing with existing files."
+    rust_steam_update "${STEAMCMD_RUN}/steamcmd.sh" "${#validate_arg[@]}" "${branch_args[@]}" || true
 else
     log "AUTO_UPDATE=0 - skipping SteamCMD, using existing server files."
 fi
@@ -132,7 +226,7 @@ mkdir -p "${HOME}/.steam/sdk32" "${HOME}/.steam/sdk64"
 #    Applied AFTER the Steam update, because `validate` restores the original
 #    game assemblies and would otherwise undo an Oxide patch.
 # ---------------------------------------------------------------------------
-fw_should_update() { [ "${FRAMEWORK_UPDATE:-1}" = "1" ]; }
+fw_should_update() { [ "${FRAMEWORK_UPDATE:-1}" = "1" ] || [ "${RUST_VALIDATED:-0}" = "1" ]; }
 
 install_oxide() {
     if [ -d /home/container/oxide ] && ! fw_should_update; then
@@ -332,21 +426,85 @@ rcon_send() { # <command> - prints the command's own reply (Identifier 1)
         | jq --unbuffered -Rr 'fromjson? | select(.Identifier == 1 and (.Message // "") != "") | .Message' 2>/dev/null
 }
 
+console_bridge_line() { # <line>
+    local line="${1%$'\r'}"
+    [ -z "${line}" ] && return 0
+    if rcon_up; then
+        rcon_send "${line}"
+    elif [ "${line,,}" = "quit" ]; then
+        log "console: RCON is not up - stopping the server with SIGTERM instead of 'quit'."
+        kill -TERM "${SERVER_PID}" 2>/dev/null
+    else
+        log "console: RCON is not reachable (server still starting?) - command dropped: ${line}"
+    fi
+}
+
+# The bridge used to be a plain `while read` loop, so the first end-of-file on
+# stdin ended it for the life of the container: a ^D on the console tty, or
+# Wings dropping and re-attaching the stream. RustDedicated kept running with no
+# path for console input left - panel commands vanished and the egg's stop
+# command `quit` never arrived, so every Stop/Restart hung in "stopping" until
+# Wings killed the container without a save (tickets 4683 and 4785, node12,
+# 2026-10-23: one start-rust process in the container instead of two). EOF now
+# only means "nothing to read right now": a partial line is still delivered, and
+# reading resumes on the same descriptor once input flows again.
 console_bridge() {
-    local line
-    while IFS= read -r line; do
-        line="${line%$'\r'}"
-        [ -z "${line}" ] && continue
-        if rcon_up; then
-            rcon_send "${line}"
-        elif [ "${line,,}" = "quit" ]; then
-            log "console: RCON is not up - stopping the server with SIGTERM instead of 'quit'."
-            kill -TERM "${SERVER_PID}" 2>/dev/null
-        else
-            log "console: RCON is not reachable (server still starting?) - command dropped: ${line}"
+    local line closed=0
+    trap '' HUP
+    while :; do
+        if IFS= read -r line; then
+            closed=0
+            console_bridge_line "${line}"
+            continue
         fi
+        [ -n "${line}" ] && console_bridge_line "${line}"
+        if [ "${closed}" = "0" ]; then
+            log "console: input stream closed - keeping the console bridge up for when it reopens."
+            closed=1
+        fi
+        sleep "${BRIDGE_EOF_SLEEP:-1}"
     done
-    # Wings detached stdin: nothing more to bridge, the server keeps running.
+}
+
+start_bridge() {
+    console_bridge <&3 &
+    BRIDGE_PID=$!
+}
+
+# Waits for RustDedicated and keeps the bridge alive while it runs: should the
+# bridge die anyway (a signal, a bug), it is restarted rather than leaving the
+# server deaf to `quit` again. Sets EXIT_CODE to the server's own exit status.
+rust_supervise() {
+    local waited rc
+    EXIT_CODE=0
+    while :; do
+        waited=""
+        if [ -n "${BRIDGE_PID}" ]; then
+            wait -n -p waited "${SERVER_PID}" "${BRIDGE_PID}"
+        else
+            wait -n -p waited "${SERVER_PID}"
+        fi
+        rc=$?
+        if [ "${waited}" = "${SERVER_PID}" ]; then
+            EXIT_CODE="${rc}"
+            break
+        fi
+        if [ -n "${BRIDGE_PID}" ] && [ "${waited}" = "${BRIDGE_PID}" ]; then
+            BRIDGE_PID=""
+            if kill -0 "${SERVER_PID}" 2>/dev/null; then
+                log "console: bridge stopped (status ${rc}) - restarting it."
+                sleep 1
+                start_bridge
+            fi
+            continue
+        fi
+        kill -0 "${SERVER_PID}" 2>/dev/null && continue
+        wait "${SERVER_PID}"
+        EXIT_CODE=$?
+        break
+    done
+    [ -n "${BRIDGE_PID}" ] && kill "${BRIDGE_PID}" 2>/dev/null
+    return 0
 }
 
 # A migrated egg carries {{ADDITIONAL_ARGS}} in the startup string itself.
@@ -368,18 +526,8 @@ trap 'kill -TERM "${SERVER_PID}" 2>/dev/null' TERM INT
 # Background jobs default stdin to /dev/null; hand the bridge the real
 # container stdin through fd 3.
 exec 3<&0
-console_bridge <&3 &
-BRIDGE_PID=$!
+start_bridge
 
-EXIT_CODE=0
-while :; do
-    if wait "${SERVER_PID}"; then
-        EXIT_CODE=0; break
-    else
-        EXIT_CODE=$?
-        kill -0 "${SERVER_PID}" 2>/dev/null || break   # exited (or was killed)
-    fi                                                  # else: wait interrupted by trap - re-wait
-done
-kill "${BRIDGE_PID}" 2>/dev/null
+rust_supervise
 log "RustDedicated exited with code ${EXIT_CODE}."
 exit "${EXIT_CODE}"
