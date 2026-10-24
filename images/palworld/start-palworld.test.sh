@@ -173,4 +173,59 @@ else
     fi
 fi
 
+# --- PAL_UE4SS_SYNC=0: the owner's own UE4SS build ---------------------------
+#
+# An experimental UE4SS loads through dwmapi.dll. Wine has to be told to prefer
+# that native proxy, and the winmm proxy an earlier sync left behind must not
+# load a second UE4SS next to it - two loaders hang the server during startup.
+
+load_ue4ss_fns() { # <sandbox>
+    sed -n -e '/^pal_dll_override() {/,/^}$/p' -e '/^pal_owner_ue4ss() {/,/^}$/p' "${SCRIPT}" > "$1/ue4ss.sh"
+    # shellcheck source=/dev/null
+    . "$1/ue4ss.sh"
+}
+load_ue4ss_fns "${SANDBOX}"
+
+WIN64="${SANDBOX}/Win64"
+mkdir -p "${WIN64}/ue4ss"
+: > "${WIN64}/winmm.dll"
+: > "${WIN64}/UE4SS.dll"
+: > "${WIN64}/ue4ss/UE4SS.dll"
+
+WINEDLLOVERRIDES="winmm=n,b;d3d9=n,b"
+pal_owner_ue4ss "${WIN64}"
+if [ "${WINEDLLOVERRIDES}" = "winmm=n,b;d3d9=n,b" ]; then
+    ok "no dwmapi.dll - the overrides are left alone"
+else
+    fail "overrides changed without a dwmapi proxy: ${WINEDLLOVERRIDES}"
+fi
+
+: > "${WIN64}/dwmapi.dll"
+pal_owner_ue4ss "${WIN64}"
+case ";${WINEDLLOVERRIDES};" in
+    *";dwmapi=n,b;"*) ok "owner's dwmapi proxy is preferred over wine's builtin" ;;
+    *) fail "dwmapi not overridden: ${WINEDLLOVERRIDES}" ;;
+esac
+case ";${WINEDLLOVERRIDES};" in
+    *";winmm=b;"*) ok "leftover winmm proxy is kept from loading a second UE4SS" ;;
+    *) fail "winmm still native-first next to dwmapi: ${WINEDLLOVERRIDES}" ;;
+esac
+case ";${WINEDLLOVERRIDES};" in
+    *";d3d9=n,b;"*) ok "unrelated overrides (d3d9 for PalDefender) survive" ;;
+    *) fail "d3d9 override lost: ${WINEDLLOVERRIDES}" ;;
+esac
+
+pal_owner_ue4ss "${WIN64}"
+if [ "$(printf '%s' "${WINEDLLOVERRIDES}" | tr ';' '\n' | grep -c '^dwmapi=')" = "1" ]; then
+    ok "applying the overrides twice does not duplicate entries"
+else
+    fail "duplicated entries: ${WINEDLLOVERRIDES}"
+fi
+
+if [ -f "${WIN64}/winmm.dll" ] && [ -f "${WIN64}/UE4SS.dll" ] && [ -f "${WIN64}/ue4ss/UE4SS.dll" ]; then
+    ok "owner mode does not touch the files in Win64"
+else
+    fail "owner mode removed files from Win64"
+fi
+
 exit "${FAILED}"

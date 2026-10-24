@@ -138,17 +138,71 @@ pal_proton_env() {
 # Only the loader itself is overwritten. Mods/ is seeded once and then left
 # alone: that is where the owner's mods and their settings live, and clobbering
 # it on an image bump would delete work the panel never backed up.
+#
+# PAL_UE4SS_SYNC=0 hands the loader to the owner. The image then never writes
+# to Pal/Binaries/Win64, so an owner can run a UE4SS build newer than the one
+# pinned here - the experimental line is what PalSchema and most current C++
+# mods are built against, and a copy put there by hand was overwritten on the
+# next start (a missing UE4SS.dll in the folder root is exactly what triggers a
+# re-sync, and experimental builds keep theirs in ue4ss/).
+#
+# Experimental builds also ship a different proxy: dwmapi.dll instead of the
+# winmm.dll this image uses. Wine does load dwmapi into the server - uxtheme
+# pulls it in - but its builtin one unless told otherwise, so the owner's proxy
+# would sit in the folder and never run. With PAL_UE4SS_SYNC=0 and a dwmapi.dll
+# in Win64 the native one is preferred, and winmm drops to builtin so that a
+# winmm proxy left over from an earlier sync cannot inject a second UE4SS next
+# to it: two loaders in one process hang the server during startup. The file is
+# left where it is - PAL_UE4SS_SYNC=1 puts everything back as it was.
+pal_dll_override() { # <dll> <n,b|b|...> - replace one entry of WINEDLLOVERRIDES
+    local name="$1" mode="$2" entry out=""
+    local IFS=';'
+    for entry in ${WINEDLLOVERRIDES:-}; do
+        [ -n "${entry}" ] || continue
+        [ "${entry%%=*}" = "${name}" ] && continue
+        out="${out:+${out};}${entry}"
+    done
+    export WINEDLLOVERRIDES="${out:+${out};}${name}=${mode}"
+}
+
+pal_owner_ue4ss() { # <dst>
+    local dst="$1"
+
+    if [ -f "${dst}/dwmapi.dll" ]; then
+        pal_dll_override dwmapi "n,b"
+        pal_dll_override winmm "b"
+        if [ -f "${dst}/winmm.dll" ]; then
+            log "PAL_UE4SS_SYNC=0 - loading the owner's UE4SS through Pal/Binaries/Win64/dwmapi.dll; winmm.dll there is ignored so only one loader runs."
+        else
+            log "PAL_UE4SS_SYNC=0 - loading the owner's UE4SS through Pal/Binaries/Win64/dwmapi.dll."
+        fi
+    elif [ -f "${dst}/winmm.dll" ]; then
+        log "PAL_UE4SS_SYNC=0 - RE-UE4SS is not synced; the owner's files in Pal/Binaries/Win64 load through winmm.dll."
+    else
+        log "PAL_UE4SS_SYNC=0 - RE-UE4SS is not synced and Pal/Binaries/Win64 has no loader proxy (dwmapi.dll or winmm.dll): the server starts without mods."
+    fi
+}
+
 pal_sync_ue4ss() {
     local src="${PAL_UE4SS_DIR:-/opt/pterohost/ue4ss}"
     local dst="/home/container/Pal/Binaries/Win64"
     local stamp="/home/container/.pterohost-ue4ss-version"
     local want have
 
+    if [ "${PAL_UE4SS_SYNC:-1}" = "0" ]; then
+        [ -d "${dst}" ] && pal_owner_ue4ss "${dst}"
+        return 0
+    fi
+
     [ -d "${src}/payload" ] || return 0
 
     if [ ! -d "${dst}" ]; then
         log "WARN: ${dst} does not exist - skipping the RE-UE4SS install. The Windows depot has probably not downloaded yet."
         return 0
+    fi
+
+    if [ -f "${dst}/dwmapi.dll" ] && [ -f "${dst}/ue4ss/UE4SS.dll" ]; then
+        log "Pal/Binaries/Win64 holds an own UE4SS build (dwmapi.dll + ue4ss/) - it is not loaded while the image manages the loader; set PAL_UE4SS_SYNC=0 to run it instead."
     fi
 
     want="$(cat "${src}/VERSION" 2>/dev/null || echo unknown)"

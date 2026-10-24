@@ -214,6 +214,18 @@ built against winmm; its provenance and checksum are recorded in the Dockerfile.
 `WINEDLLOVERRIDES="winmm=n,b"` is what makes wine prefer it over its builtin -
 without that line mods fail with no error and no log line at all.
 
+**`PAL_UE4SS_SYNC=0` gives the loader to the owner.** The pinned loader is the
+stable v3.0.1; PalSchema and most current C++/Lua mods want an experimental
+build, and a copy put into `Win64` by hand was overwritten on the next boot.
+With the variable at `0` the image never writes to `Pal/Binaries/Win64`. An
+experimental build loads through its own `dwmapi.dll` with the DLL in `ue4ss/`:
+wine does map dwmapi into the server (uxtheme pulls it in), but its builtin one,
+so in this mode a `dwmapi.dll` in `Win64` switches the overrides to
+`dwmapi=n,b;winmm=b` - the owner's proxy runs and a winmm proxy left by an
+earlier sync cannot inject a second UE4SS, which hangs the server at startup.
+Nothing is deleted; setting the variable back to `1` restores the image's
+loader on the next boot.
+
 **The egg's `done` marker has to change.** Most Palworld eggs use `Setting
 breakpad minidump AppID = 2394010`, which comes from the native build's
 `steamclient.so` and is **not printed under Proton** - Wings would leave such a
