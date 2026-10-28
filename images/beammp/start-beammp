@@ -104,7 +104,7 @@ beammp_toml_value() {
         ''|*[!0-9]*)
             case "$1" in
                 true|false) printf '%s' "$1" ;;
-                *) printf '"%s"' "$(printf '%s' "$1" | sed 's/"/\\"/g')" ;;
+                *) printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')" ;;
             esac
             ;;
         *) printf '%s' "$1" ;;
@@ -112,16 +112,26 @@ beammp_toml_value() {
 }
 
 # Правит одно поле в секции [General], не трогая остальные строки файла.
+# Строка идёт в awk через окружение: в sed символы | & \ из названия сервера
+# ломали выражение, и поле молча оставалось старым.
 beammp_set() {
-    local key="$1" value="$2" formatted
+    local key="$1" value="$2" tmp
     [ -z "$value" ] && return 0
-    formatted="$(beammp_toml_value "$value")"
+    tmp="${CONFIG}.tmp"
 
-    if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$CONFIG"; then
-        sed -i -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${formatted}|" "$CONFIG"
-    else
-        sed -i "/^\[General\]/a ${key} = ${formatted}" "$CONFIG"
-    fi
+    BEAMMP_KEY="$key" BEAMMP_LINE="${key} = $(beammp_toml_value "$value")" awk '
+        BEGIN { key = ENVIRON["BEAMMP_KEY"]; line = ENVIRON["BEAMMP_LINE"] }
+        { lines[NR] = $0 }
+        $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") { found = 1 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (lines[i] ~ ("^[[:space:]]*" key "[[:space:]]*=")) { print line; continue }
+                print lines[i]
+                if (!found && lines[i] ~ /^\[General\]/) { print line; found = 1 }
+            }
+        }
+    ' "$CONFIG" > "$tmp" && cat "$tmp" > "$CONFIG"
+    rm -f "$tmp"
 }
 
 beammp_config() {
