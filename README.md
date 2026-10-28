@@ -259,6 +259,17 @@ All of these replace third-party images the panel could not fix. Each is a
   64-bit build (`USE_JEMALLOC=0` to disable) and `SRCDS_THREADS` exposes the job
   system's pool size.
 
+  SteamCMD always logs in **anonymously** here, even when the egg sets
+  `STEAM_USER`/`STEAM_PASS`: the dedicated server needs no account, and one
+  shared account across the fleet ran into Steam's login limit at the 05:00
+  restart wave (`Logging in user ... Retrying...` for 5-30+ minutes).
+  `GMOD_STEAM_LOGIN=account` restores the account login. When the branch is
+  already installed, the boot first asks Steam for the branch's current build
+  (`app_info_print`, capped at `GMOD_STEAM_CHECK_TIMEOUT`, default 90 s): if it
+  matches the appmanifest, `app_update` is skipped; if Steam does not answer in
+  time, the server starts with the files on disk. `VALIDATE=1`, a fresh install
+  and a branch switch always go through the full update.
+
   `gmod_mcore_test` and `sv_parallel_packentities`/`sv_parallel_sendsnapshot`
   are **on by default here** (`GMOD_MCORE=0` / `SV_PARALLEL=0` to roll back).
   Upstream ships both off because they have a long history of crashes and

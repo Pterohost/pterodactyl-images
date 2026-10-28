@@ -77,7 +77,81 @@ FORCE_PUBLIC=0
 
 log "Steam branch: ${BRANCH} (SRCDS_BRANCH=${SRCDS_BRANCH:-auto}, USE_64BIT_BETA=${WANT64})."
 
-if [ "${AUTO_UPDATE:-1}" = "1" ]; then
+# The Garry's Mod dedicated server, x86-64 branch included, downloads
+# anonymously. The egg still carries a shared tech account in STEAM_USER and
+# STEAM_PASS, and with them set every GMod server on the fleet logged in as the
+# same user - the 05:00 restart wave hit Steam's per-account login limit and
+# boots hung on "Logging in user ... to Steam Public...Retrying..." for 5 to
+# 30+ minutes (server 9160, October 2026). Anonymous on the same node: logged
+# in within 10 s, the full 7 GB depot in under a minute. GMOD_STEAM_LOGIN=account
+# brings the account login back for a server that really needs it.
+if [ "${GMOD_STEAM_LOGIN:-anonymous}" != "account" ]; then
+    unset STEAM_USER STEAM_PASS
+fi
+
+# gmod_build_check
+#   Asks Steam for the current build of ${BRANCH} and compares it with the
+#   appmanifest on disk. Returns 0 when the install is current, 1 when an update
+#   is needed (or the answer is unclear), 2 when Steam did not answer within
+#   GMOD_STEAM_CHECK_TIMEOUT seconds. A boot with nothing to download then costs
+#   one short SteamCMD call instead of a full app_update, and a Steam outage
+#   costs at most that timeout instead of holding the server down.
+gmod_build_check() {
+    local manifest="/home/container/steamapps/appmanifest_${APPID}.acf"
+    local local_build local_branch remote_build out login_args=()
+    [ -f "${manifest}" ] || return 1
+    local_build="$(awk '$1 == "\"buildid\"" { gsub(/"/, "", $2); print $2; exit }' "${manifest}")"
+    local_branch="$(awk '$1 == "\"BetaKey\"" { gsub(/"/, "", $2); print $2; exit }' "${manifest}")"
+    [ -n "${local_branch}" ] || local_branch="public"
+    { [ -n "${local_build}" ] && [ "${local_branch}" = "${BRANCH}" ]; } || return 1
+
+    pterohost_steam_seed
+    while IFS= read -r arg; do login_args+=("${arg}"); done < <(pterohost_steam_login_args)
+    out="$(timeout "${GMOD_STEAM_CHECK_TIMEOUT:-90}" "${STEAMCMD_RUN}/steamcmd.sh" \
+        +@ShutdownOnFailedCommand 1 +@NoPromptForPassword 1 \
+        "${login_args[@]}" +app_info_update 1 +app_info_print "${APPID}" +quit 2>&1)"
+    [ $? -eq 124 ] && return 2
+    # Walk the VDF tree and take depots > branches > ${BRANCH} > buildid.
+    remote_build="$(printf '%s\n' "${out}" | awk -v br="${BRANCH}" '
+        { gsub(/\033\[[0-9;]*m/, ""); gsub(/^[ \t]+|[ \t\r]+$/, "") }
+        $0 == "{" { depth++; path[depth] = pending; next }
+        $0 == "}" { depth--; next }
+        /^"[^"]*"/ {
+            n = split($0, f, "\"")
+            if (n <= 3) { pending = f[2]; next }
+            if (f[2] == "buildid" && depth >= 3 && path[depth] == br \
+                && path[depth - 1] == "branches" && path[depth - 2] == "depots") { print f[4]; exit }
+        }')"
+    if [ -z "${remote_build}" ]; then
+        printf '%s\n' "${out}" | grep -qiE "Retrying|FAILED|No connection|Timeout" && return 2
+        return 1
+    fi
+    if [ "${remote_build}" = "${local_build}" ]; then
+        log "Build ${local_build} on branch ${BRANCH} is current - skipping app_update."
+        return 0
+    fi
+    log "Steam has build ${remote_build} on branch ${BRANCH}, installed ${local_build} - updating."
+    return 1
+}
+
+# Only a server that already has this branch installed may skip the update:
+# a fresh install or a branch switch always goes through app_update.
+UPDATE_NEEDED=1
+if [ "${AUTO_UPDATE:-1}" = "1" ] && [ "${VALIDATE:-0}" != "1" ] && [ -e "${SENTINEL}" ]; then
+    gmod_build_check
+    case $? in
+        0) UPDATE_NEEDED=0 ;;
+        2)
+            log "WARN: Steam did not answer within ${GMOD_STEAM_CHECK_TIMEOUT:-90} s - starting with the files on disk."
+            UPDATE_NEEDED=0
+            ;;
+    esac
+fi
+
+if [ "${AUTO_UPDATE:-1}" = "1" ] && [ "${UPDATE_NEEDED}" = "0" ]; then
+    pterohost_steam_seed
+    pterohost_steam_sdk
+elif [ "${AUTO_UPDATE:-1}" = "1" ]; then
     if ! pterohost_steam_update "${APPID}" "${BRANCH}" "${VALIDATE:-0}" "${SENTINEL}" "${FORCE_PUBLIC}"; then
         # The appmanifest says the branch is installed, so a plain update has
         # nothing to do - but the binary is gone (deleted or renamed by hand).
