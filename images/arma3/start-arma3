@@ -31,12 +31,53 @@ BINARY="${SERVER_BINARY:-arma3server_x64}"
 CFG="/home/container/server.cfg"
 RPT_DIR="/home/container/serverprofile/rpt"
 
+# The branch. Egg 82 has no SRCDS_BETAID; it publishes STEAMCMD_EXTRA_FLAGS
+# ("-beta profiling -betapassword ...") instead, and nothing read it, so a
+# server switched to the profiling branch in the panel kept booting the stable
+# build with "already up to date" (ticket 4626). Only -beta and -betapassword
+# are taken from it - the update command itself is not the customer's to extend.
+BRANCH="${SRCDS_BETAID:-}"
+if [ -n "${STEAMCMD_EXTRA_FLAGS:-}" ]; then
+    read -r -a extra_flags <<< "${STEAMCMD_EXTRA_FLAGS}"
+    i=0
+    while [ "${i}" -lt "${#extra_flags[@]}" ]; do
+        case "${extra_flags[${i}]}" in
+            -beta)
+                BRANCH="${extra_flags[$((i + 1))]:-}"
+                i=$((i + 2))
+                ;;
+            -betapassword)
+                SRCDS_BETAPASS="${extra_flags[$((i + 1))]:-}"
+                export SRCDS_BETAPASS
+                i=$((i + 2))
+                ;;
+            *)
+                log "WARN: STEAMCMD_EXTRA_FLAGS: '${extra_flags[${i}]}' is not supported - ignored (only -beta and -betapassword are)."
+                i=$((i + 1))
+                ;;
+        esac
+    done
+fi
+
+# SteamCMD keeps the last branch it was given: once the flags are cleared, a
+# bare app_update leaves the server on profiling for good. A manifest that still
+# names a beta while none is asked for gets an explicit "-beta public".
+FORCE_PUBLIC=0
+MANIFEST="/home/container/steamapps/appmanifest_${APPID}.acf"
+if [ -z "${BRANCH}" ] && [ -f "${MANIFEST}" ]; then
+    installed_branch="$(awk '$1 == "\"BetaKey\"" { gsub(/"/, "", $2); print $2; exit }' "${MANIFEST}")"
+    if [ -n "${installed_branch}" ] && [ "${installed_branch}" != "public" ]; then
+        log "Installed branch is ${installed_branch}, none requested - switching back to public."
+        FORCE_PUBLIC=1
+    fi
+fi
+
 if [ "${UPDATE_SERVER:-1}" = "1" ]; then
     if [ -z "${STEAM_USER:-}" ] || [ "${STEAM_USER}" = "anonymous" ]; then
         log "WARN: Arma 3's server depot needs a Steam account that owns the game; STEAM_USER is unset."
     fi
-    pterohost_steam_update "${APPID}" "${SRCDS_BETAID:-}" "${VALIDATE_SERVER:-0}" \
-        "/home/container/${BINARY}" || true
+    pterohost_steam_update "${APPID}" "${BRANCH}" "${VALIDATE_SERVER:-0}" \
+        "/home/container/${BINARY}" "${FORCE_PUBLIC}" || true
 else
     log "UPDATE_SERVER=0 - skipping SteamCMD."
     pterohost_steam_seed
