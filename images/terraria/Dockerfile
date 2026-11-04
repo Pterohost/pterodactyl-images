@@ -26,6 +26,7 @@ RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
 
 RUN mkdir -p /usr/local/lib/pterohost
 COPY --chmod=755 shared/launch.sh /usr/local/lib/pterohost/launch.sh
+COPY --chmod=755 images/terraria/terraria-version.sh /usr/local/lib/pterohost/terraria-version.sh
 COPY --chmod=755 images/terraria/start-terraria /usr/local/bin/start-terraria
 
 ENV PTEROHOST_IMAGE="terraria" \

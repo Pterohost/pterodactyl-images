@@ -86,6 +86,9 @@ jobs:
       - name: images/palworld/start-palworld.test.sh
         run: bash images/palworld/start-palworld.test.sh
 
+      - name: images/terraria/terraria-version.test.sh
+        run: bash images/terraria/terraria-version.test.sh
+
       - name: images/plains-of-pain/start-plains-of-pain.test.sh
         run: bash images/plains-of-pain/start-plains-of-pain.test.sh
 

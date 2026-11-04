@@ -8,9 +8,11 @@
 #
 # Источники обновлений разные, поэтому и правила разные:
 #   vanilla     - terraria.org отдаёт архив по номеру версии, «последней»
-#                 ссылки у них нет. Версия задаётся явно (TERRARIA_VERSION),
-#                 апстримный egg скрёб gamepedia.com, который переехал, и
-#                 установка на нём сегодня падает.
+#                 ссылки у них нет. Апстримный egg скрёб gamepedia.com, который
+#                 переехал, и установка на нём сегодня падает. «latest» (и
+#                 пустое значение) разрешается пробой номеров вверх от
+#                 установленной версии (terraria-version.sh), число остаётся
+#                 закреплением, без сети остаётся установленная версия.
 #   tshock      - релизы на GitHub, ассет linux-x64.
 #   tmodloader  - релизы на GitHub, ассет tModLoader.zip, собран под .NET 8,
 #                 который уже есть в образе.
@@ -31,9 +33,10 @@ mkdir -p "$ROOT"
 cd "$ROOT" || exit 1
 
 . /usr/local/lib/pterohost/launch.sh
+. "${TERRARIA_VERSION_LIB:-/usr/local/lib/pterohost/terraria-version.sh}"
 
 TERRARIA_CORE="${TERRARIA_CORE:-vanilla}"
-TERRARIA_VERSION="${TERRARIA_VERSION:-1456}"
+TERRARIA_VERSION="${TERRARIA_VERSION:-latest}"
 TSHOCK_VERSION="${TSHOCK_VERSION:-latest}"
 TMODLOADER_VERSION="${TMODLOADER_VERSION:-latest}"
 WORLD_NAME="${WORLD_NAME:-world}"
@@ -58,6 +61,7 @@ terraria_github_asset() {
 
 # Ванильный сервер: собственный ELF, рантайм ему не нужен.
 terraria_install_vanilla() {
+    TERRARIA_VERSION="$(terraria_resolve_version "$TERRARIA_VERSION" "$ROOT")"
     [ -f ${ROOT}/TerrariaServer.bin.x86_64 ] \
         && [ -f "${ROOT}/.terraria-${TERRARIA_VERSION}" ] && return 0
 
