@@ -171,6 +171,8 @@ jobs:
         include:
           - tag: java_7
             dir: java-7
+            # Zulu 7 exists for x86-64 only.
+            platforms: linux/amd64
           - tag: java_8
             dir: java-8
           - tag: java_11

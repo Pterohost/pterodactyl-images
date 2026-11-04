@@ -16,7 +16,7 @@ Keep Pterodactyl egg exports in the internal panel repository; do not commit
 
 | Tag | Runtime | JDK | Default GC | Base | Status |
 |---|---|---|---|---|---|
-| `java_7` | Azul Zulu 7 | 7 | G1 | debian:bullseye | legacy, frozen |
+| `java_7` | Azul Zulu 7 (7u352, amd64 only) | 7 | G1 | debian:12-slim | legacy, frozen JDK on a supported base |
 | `java_8` | Eclipse Temurin 8 | 8 | G1 | ubuntu:jammy | stable |
 | `java_11` | Eclipse Temurin 11 | 11 | G1 | ubuntu:jammy | stable |
 | `java_16` | Eclipse Temurin 16 | 16 | G1 | ubuntu:focal | EOL, frozen |
