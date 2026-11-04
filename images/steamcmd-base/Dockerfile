@@ -10,7 +10,17 @@
 # survive restarts.
 #
 # amd64 only - SteamCMD ships no arm64 build.
-FROM debian:12-slim
+#
+# Two tags are built from this one file. `steamcmd_base` is debian:12 (glibc
+# 2.36) and carries every game image except one. `steamcmd_base_trixie` is the
+# same layer on debian:13 (glibc 2.41), built with BASE_IMAGE=debian:13-slim,
+# for games whose binaries have moved past 2.36: Garry's Mod's dev branch
+# switched to a toolchain that needs GLIBC_2.38 in srcds_linux and every engine
+# .so on 2026-11-03, and on the bookworm base those servers died at once with
+# "version `GLIBC_2.38' not found". The package list below installs unchanged
+# on both releases; keep it that way, or branch on /etc/debian_version.
+ARG BASE_IMAGE=debian:12-slim
+FROM ${BASE_IMAGE}
 
 LABEL org.opencontainers.image.source="https://github.com/Pterohost/pterodactyl-images"
 LABEL org.opencontainers.image.licenses="MIT"

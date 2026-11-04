@@ -105,11 +105,23 @@ jobs:
   # are mutable and are what the nodes pull - :zomboid is the image a live
   # server starts from - so building a PR would put unreviewed code on customer
   # servers the moment the branch was pushed, merge or no merge.
+  #
+  # Two legs from the same Dockerfile: the bookworm base every game image uses,
+  # and a trixie one (glibc 2.41) for games whose binaries need more than 2.36 -
+  # gmod since the dev branch moved to GLIBC_2.38. `derived` waits on both.
   base:
-    name: "steamcmd_base"
+    name: "${{ matrix.tag }}"
     needs: test
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: steamcmd_base
+            base_image: debian:12-slim
+          - tag: steamcmd_base_trixie
+            base_image: debian:13-slim
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -131,14 +143,16 @@ jobs:
           file: ./images/steamcmd-base/Dockerfile
           # SteamCMD itself is a 32-bit x86 binary.
           platforms: linux/amd64
+          build-args: |
+            BASE_IMAGE=${{ matrix.base_image }}
           push: true
           provenance: true
           sbom: true
           tags: |
-            ghcr.io/pterohost/pterodactyl-images:steamcmd_base
-            ghcr.io/pterohost/pterodactyl-images:steamcmd_base-${{ github.sha }}
-          cache-from: type=gha,scope=steamcmd_base
-          cache-to: type=gha,mode=max,scope=steamcmd_base
+            ghcr.io/pterohost/pterodactyl-images:${{ matrix.tag }}
+            ghcr.io/pterohost/pterodactyl-images:${{ matrix.tag }}-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.tag }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.tag }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.url=https://github.com/Pterohost/pterodactyl-images

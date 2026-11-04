@@ -38,13 +38,14 @@ Keep Pterodactyl egg exports in the internal panel repository; do not commit
 | Tag | Runtime | Base | Arch | Notes |
 |---|---|---|---|---|
 | `steamcmd_base` | SteamCMD + tini + locales | debian:12-slim | amd64 | Shared base for the game images below. Not useful on its own. |
+| `steamcmd_base_trixie` | SteamCMD + tini + locales | debian:13-slim | amd64 | The same base on glibc 2.41, built from the same Dockerfile (`BASE_IMAGE`). For games whose binaries need more than glibc 2.36 - currently `gmod`. |
 | `plains_of_pain` | Plains of Pain (native Linux / Unity) | `steamcmd_base` | amd64 | Steam app `2227360`. Persistent JSON/worlds, two allocated UDP ports, SIGINT saves. [Runtime and NAT guide](images/plains-of-pain/README.md). |
 | `sbox` | s&box dedicated server (SteamCMD + Wine) | ubuntu:24.04 | amd64 | Steam app `1892930`, anonymous SteamCMD. See below. |
 | `rust` | RustDedicated (native Linux) | debian:12-slim | amd64 | Steam app `258550`, Oxide / Carbon / vanilla. See below. |
 | `zomboid` | Project Zomboid dedicated server | `steamcmd_base` | amd64 | Steam app `380870`. cgroup-aware JVM heap, RCON, save-on-stop. See below. |
 | `palworld` | Palworld dedicated server | `steamcmd_base` | amd64 | Steam app `2394010`. RCON + REST API, perf flags. See below. |
 | `palworld_proton` | Palworld, **Windows depot under GE-Proton** | `steamcmd_base` | amd64 | Steam app `2394010`. Same bootstrap as `palworld` plus RE-UE4SS. **Slower than the native tag - take it only for mods.** See below. |
-| `gmod` | Garry's Mod (srcds) | `steamcmd_base` | amd64 | Steam app `4020`. **x86-64 branch by default**, any branch via `SRCDS_BRANCH`, RCON, strict port bind. |
+| `gmod` | Garry's Mod (srcds) | `steamcmd_base_trixie` | amd64 | Steam app `4020`. **x86-64 branch by default**, any branch via `SRCDS_BRANCH`, RCON, strict port bind. On the trixie base because the dev branch needs `GLIBC_2.38` - see below. |
 | `gmod_classic` | Garry's Mod (srcds) | `ghcr.io/pterodactyl/games:source` | amd64 | Upstream image plus a `start-gmod` that runs the startup command verbatim. No image-side tuning - the compatibility fallback for `gmod`. |
 | `cs2` | Counter-Strike 2 | steamrt sniper | amd64 | Steam app `730`. On the official Steam Runtime 3 platform. |
 | `sevendaystodie` | 7 Days To Die | `steamcmd_base` | amd64 | Steam app `294420`. Telnet console bridge. |
@@ -71,6 +72,17 @@ Wings runs the container under its own uid), the 32-bit runtime SteamCMD needs,
 inside the volume) and `kvconf.sh` (surgical `key=value` config patching that
 leaves keys we do not own untouched). Game images are `FROM` it, so adding a
 game is a short Dockerfile plus its `start-*` script.
+
+`steamcmd_base_trixie` is that layer on debian:13 (glibc 2.41) instead of
+debian:12 (glibc 2.36), built from the same Dockerfile with
+`BASE_IMAGE=debian:13-slim`. It exists because of Garry's Mod: on 2026-11-03
+Facepunch moved the `dev` branch (build 26393045) to a newer toolchain, and
+`srcds_linux` plus every engine `.so` in it now needs `GLIBC_2.38`. On the
+bookworm base every dev server died on its first start after the update with
+`/lib/i386-linux-gnu/libc.so.6: version 'GLIBC_2.38' not found`. `public` and
+`x86-64` were still on `GLIBC_2.4` that day, but they follow dev, so `gmod`
+moved to the trixie base before they do. To check a game against a base, grep
+its binaries: `grep -ao 'GLIBC_2\.[0-9]*' srcds_linux bin/*.so | sort -uV | tail -1`.
 
 The `zomboid` tag ships a `start-zomboid` bootstrap. Use it with an egg whose
 startup command is `start-zomboid`. Per boot it:
@@ -680,6 +692,11 @@ docker buildx build \
   --load .
 
 docker run --rm -e STARTUP='java -version' pt-test:21
+
+# The trixie SteamCMD base, which gmod is FROM
+docker build --build-arg BASE_IMAGE=debian:13-slim \
+  -f images/steamcmd-base/Dockerfile \
+  -t ghcr.io/pterohost/pterodactyl-images:steamcmd_base_trixie .
 ```
 
 For multi-arch the runner needs QEMU emulation (`docker run --privileged --rm tonistiigi/binfmt --install all`).
