@@ -440,6 +440,15 @@ cleanly. An end-of-file on stdin (a `^D` on the console, Wings dropping and
 re-attaching the stream) no longer ends the bridge, and should it die anyway
 it is restarted while the server runs - a dead bridge is what left Stop and
 Restart hanging in "stopping" with `quit` going nowhere.
+RustDedicated is started in a session of its own, without a controlling
+terminal: on the container tty its console switched the terminal to
+non-canonical mode with `VMIN=0`, every idle read became an "end of file" and
+only the first panel command was executed. The bridge also puts the tty back
+into canonical mode and joins a command that arrives in two pieces. Commands go
+over one long-lived WebRCON connection: RustDedicated refuses a sixth
+connection from the same address, so a connection per command lost every
+command after the fifth in a burst. `docker stop` (SIGTERM) now waits for the
+server to exit instead of tripping `set -u` in the supervisor.
 `images/rust/start-rust.test.sh` covers the bridge and the update verdict.
 
 s&box currently only ships an anonymously-installable build on the **Windows**

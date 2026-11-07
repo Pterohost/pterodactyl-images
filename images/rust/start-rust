@@ -20,7 +20,7 @@
 #                      crashes Oxide's compiler; safe only for vanilla/Carbon)
 #   CHAOS_DL / DISCORD_EXT / RUSTEDIT_EXT  1 = fetch that Oxide extension
 #   TICKRATE, FPS_LIMIT, GC_BUFFER         performance knobs
-#   RCON_REPLY_WINDOW  seconds to wait for a console command's RCON reply (5)
+#   RCON_CONNECT_SETTLE  seconds to wait for the console's RCON handshake (0.3)
 #   SERVER_PORT (Wings), QUERY_PORT, RCON_PORT, RCON_PASS, APP_PORT,
 #   SERVER_IDENTITY, HOSTNAME, DESCRIPTION, SERVER_URL, SERVER_IMG, SERVER_LOGO,
 #   MAX_PLAYERS, SAVEINTERVAL, GAMEMODE, WORLD_SIZE, WORLD_SEED, LEVEL, MAP_URL,
@@ -410,27 +410,85 @@ fi
 # 6. Launch RustDedicated + panel-console bridge.
 #    RustDedicated does NOT read stdin, but stdin is exactly where Wings
 #    delivers panel-console input (including the egg stop command "quit"), so
-#    without a bridge the console silently ignores every command. Forward each
-#    stdin line to the server's local WebRCON endpoint (rcon.web is always on,
-#    see ARGS above) and echo the direct reply back to stdout so it shows up in
-#    the panel. Broadcast RCON messages (Identifier 0) are skipped - the server
-#    already prints its log to stdout and they would duplicate every line.
+#    without a bridge the console silently ignores every command. (Its own
+#    terminal console reads /dev/tty instead; rust_launch takes the terminal
+#    away from it so the bridge is the only reader.) Forward each stdin line to
+#    the server's local WebRCON endpoint (rcon.web is always on, see ARGS
+#    above) over one long-lived connection and echo the direct replies back to
+#    stdout so they show up in the panel. Broadcast RCON messages (Identifier 0)
+#    are skipped - the server already prints its log to stdout and they would
+#    duplicate every line.
 # ---------------------------------------------------------------------------
 RCON_URL="ws://127.0.0.1:${RCON_PORT:-28016}/${RCON_PASS:-}"
 
 rcon_up() { timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${RCON_PORT:-28016}" 2>/dev/null; }
 
-rcon_send() { # <command> - prints the command's own reply (Identifier 1)
-    jq -cn --arg m "$1" '{Identifier: 1, Message: $m, Name: "WebRcon"}' \
-        | timeout "${RCON_REPLY_WINDOW:-5}" websocat -t "${RCON_URL}" 2>/dev/null \
-        | jq --unbuffered -Rr 'fromjson? | select(.Identifier == 1 and (.Message // "") != "") | .Message' 2>/dev/null
+# The bridge keeps ONE WebRCON connection open and writes every console command
+# into it. It used to open a fresh connection per command (plus a TCP probe),
+# and RustDedicated refuses a sixth connection from one address while five are
+# still counted: a burst of panel commands - six `oxide.grant` in a row - got
+# "WebSocket protocol error" from the sixth on and those commands were never
+# executed (ticket 5028; measured on a live server, 5 of 30 back-to-back
+# `oxide.version` were answered). Replies come back on the same connection and
+# are printed as they arrive; broadcast messages (Identifier 0/-1, the server
+# log the console already shows) are dropped. Oxide follows some replies with
+# an empty Identifier 1 message, hence the empty-message filter.
+RCON_PID=""
+RCON_IN=""
+
+rcon_close() {
+    [ -n "${RCON_IN}" ] && exec {RCON_IN}>&-
+    [ -n "${RCON_PID}" ] && kill "${RCON_PID}" 2>/dev/null
+    RCON_IN=""
+    RCON_PID=""
+    return 0
+}
+
+rcon_session() { # opens the connection unless it is up; 1 when RCON refuses
+    local dir
+    if [ -n "${RCON_PID}" ] && kill -0 "${RCON_PID}" 2>/dev/null; then
+        return 0
+    fi
+    rcon_close
+    rcon_up || return 1
+    dir="$(mktemp -d)" || return 1
+    if ! mkfifo "${dir}/in"; then
+        rm -rf "${dir}"
+        return 1
+    fi
+    websocat -n -t "${RCON_URL}" < "${dir}/in" 2>/dev/null \
+        > >(jq --unbuffered -Rr 'fromjson? | select(.Identifier == 1 and (.Message // "") != "") | .Message' 2>/dev/null) &
+    RCON_PID=$!
+    exec {RCON_IN}>"${dir}/in"
+    rm -rf "${dir}"
+    # A refused handshake ends websocat within milliseconds; give it the
+    # chance before a command is written into a dead pipe.
+    sleep "${RCON_CONNECT_SETTLE:-0.3}"
+    if ! kill -0 "${RCON_PID}" 2>/dev/null; then
+        rcon_close
+        return 1
+    fi
+    return 0
+}
+
+rcon_send() { # <command> - hands it to the open connection; 1 if RCON is unusable
+    local msg try
+    msg="$(jq -cn --arg m "$1" '{Identifier: 1, Message: $m, Name: "WebRcon"}')" || return 1
+    for try in 1 2; do
+        if rcon_session && printf '%s\n' "${msg}" >&"${RCON_IN}" 2>/dev/null; then
+            return 0
+        fi
+        rcon_close
+        [ "${try}" = 1 ] && sleep 1
+    done
+    return 1
 }
 
 console_bridge_line() { # <line>
     local line="${1%$'\r'}"
     [ -z "${line}" ] && return 0
-    if rcon_up; then
-        rcon_send "${line}"
+    if rcon_send "${line}"; then
+        return 0
     elif [ "${line,,}" = "quit" ]; then
         log "console: RCON is not up - stopping the server with SIGTERM instead of 'quit'."
         kill -TERM "${SERVER_PID}" 2>/dev/null
@@ -448,16 +506,38 @@ console_bridge_line() { # <line>
 # 2026-10-23: one start-rust process in the container instead of two). EOF now
 # only means "nothing to read right now": a partial line is still delivered, and
 # reading resumes on the same descriptor once input flows again.
+#
+# On a tty an "EOF" is usually not one. A process that switches the line
+# discipline to non-canonical mode with VMIN=0/VTIME=0 (RustDedicated's own
+# console did, see rust_launch) makes read(2) return 0 whenever no byte is
+# waiting, and a command can arrive split across two reads. So on a tty the
+# bridge puts the line discipline back to line-at-a-time and keeps a partial
+# line until its end arrives instead of running half a command.
+console_tty_canon() { # stdin is a tty in non-canonical mode -> canonical again
+    [ -t 0 ] || return 0
+    case " $(stty -a 2>/dev/null) " in
+        *" -icanon "*) stty icanon 2>/dev/null ;;
+    esac
+    return 0
+}
+
 console_bridge() {
-    local line closed=0
-    trap '' HUP
+    local line closed=0 carry=""
+    trap '' HUP PIPE
+    console_tty_canon
     while :; do
         if IFS= read -r line; then
             closed=0
-            console_bridge_line "${line}"
+            console_bridge_line "${carry}${line}"
+            carry=""
             continue
         fi
-        [ -n "${line}" ] && console_bridge_line "${line}"
+        if [ -t 0 ]; then
+            carry="${carry}${line}"
+            console_tty_canon
+        else
+            [ -n "${line}" ] && console_bridge_line "${line}"
+        fi
         if [ "${closed}" = "0" ]; then
             log "console: input stream closed - keeping the console bridge up for when it reopens."
             closed=1
@@ -469,6 +549,24 @@ console_bridge() {
 start_bridge() {
     console_bridge <&3 &
     BRIDGE_PID=$!
+}
+
+# RustDedicated runs in a session of its own, without a controlling terminal.
+# Started on the container tty, its console opened /dev/tty and put the line
+# discipline into non-canonical mode with VMIN=0/VTIME=0, the very terminal the
+# bridge reads panel input from: every read without a byte waiting returned 0,
+# the bridge logged "input stream closed", and after the first command the
+# console stopped executing anything (ticket 5028, node04, 2026-11-08). Without
+# a controlling terminal open("/dev/tty") fails, so the game leaves the line
+# discipline alone and prints its console to stdout as plain text instead of
+# coloured text on /dev/tty - warnings and errors included (checked on build
+# 2636 with Oxide: same lines, no colour codes). A background job of this
+# non-interactive shell is not a process group leader, so setsid execs in place
+# and SERVER_PID is RustDedicated itself; signals reach it through the trap
+# below rather than tini's group kill. Sets SERVER_PID.
+rust_launch() { # <command...>
+    setsid "$@" &
+    SERVER_PID=$!
 }
 
 # Waits for RustDedicated and keeps the bridge alive while it runs: should the
@@ -485,11 +583,14 @@ rust_supervise() {
             wait -n -p waited "${SERVER_PID}"
         fi
         rc=$?
-        if [ "${waited}" = "${SERVER_PID}" ]; then
+        # A trapped TERM/INT interrupts `wait -n` and leaves the -p variable
+        # unset; under set -u the bare "${waited}" then killed this script, and
+        # tini took the container down while RustDedicated was still saving.
+        if [ "${waited:-}" = "${SERVER_PID}" ]; then
             EXIT_CODE="${rc}"
             break
         fi
-        if [ -n "${BRIDGE_PID}" ] && [ "${waited}" = "${BRIDGE_PID}" ]; then
+        if [ -n "${BRIDGE_PID}" ] && [ "${waited:-}" = "${BRIDGE_PID}" ]; then
             BRIDGE_PID=""
             if kill -0 "${SERVER_PID}" 2>/dev/null; then
                 log "console: bridge stopped (status ${rc}) - restarting it."
@@ -516,8 +617,7 @@ fi
 log "framework=${FRAMEWORK} branch=${BRANCH} launching RustDedicated"
 pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
 
-"${PTEROHOST_ARGS[@]}" &
-SERVER_PID=$!
+rust_launch "${PTEROHOST_ARGS[@]}"
 
 # tini -g already signals the whole process group; forward explicitly as well
 # so a signal delivered only to this shell still reaches the server.

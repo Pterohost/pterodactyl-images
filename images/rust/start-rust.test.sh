@@ -11,6 +11,14 @@
 #   - The console bridge ended at the first end-of-file on stdin, after which
 #     panel commands and the egg's stop command `quit` went nowhere and every
 #     Stop/Restart hung in "stopping" (tickets 4683, 4785).
+#   - RustDedicated shared the container tty with the bridge and switched it to
+#     non-canonical mode with VMIN=0: every idle read was an "EOF", and after
+#     the first panel command nothing else was executed (ticket 5028).
+#   - Every console command opened its own RCON connection, and RustDedicated
+#     refuses a sixth one from the same address: in a burst of commands the
+#     sixth and later were lost (ticket 5028).
+#   - A TERM during `wait -n -p` left the variable unset, set -u killed the
+#     script and the container went down while the server was still saving.
 #
 # The functions are lifted out of the shipped script by marker, so the tests
 # cover the code that ships. The one edit made to the lifted text is
@@ -48,7 +56,7 @@ wait_for() { # <seconds> <command...>
 
 LIFTED="${SANDBOX}/lifted.sh"
 : > "${LIFTED}"
-for fn in rust_manifest_field rust_steam_failure rust_steam_update console_bridge_line console_bridge start_bridge rust_supervise; do
+for fn in rust_manifest_field rust_steam_failure rust_steam_update console_bridge_line console_tty_canon console_bridge start_bridge rust_launch rust_supervise; do
     if ! sed -n "/^${fn}() {/,/^}$/p" "${SCRIPT}" | grep -q .; then
         printf 'FATAL: could not lift %s out of %s\n' "${fn}" "${SCRIPT}"
         exit 1
@@ -229,6 +237,150 @@ assert_has "a killed bridge is restarted while the server runs" 'bridge stopped 
 assert_has "quit through the restarted bridge stops the server" '^quit$' "${SANDBOX}/rcon"
 assert_has "the server's own exit code comes out of the supervisor" '^EXIT_CODE=7$' "${SANDBOX}/super.out"
 exec 7>&-
+
+# 4. The container tty. RustDedicated's console used to open /dev/tty and set
+# -icanon min 0 time 0, after which every idle read(2) returned 0 and the first
+# panel command was the last one executed (ticket 5028). Under a real pty:
+# rust_launch must leave the server without a controlling terminal and keep
+# SERVER_PID pointing at it; the bridge must put the tty back into canonical
+# mode and join a command that arrived in two pieces instead of running both
+# halves. Needs python3 for the pty; skipped without it.
+if command -v python3 >/dev/null 2>&1; then
+    rm -f "${SANDBOX}/rcon" "${SANDBOX}/ttyprobe" "${SANDBOX}/stubpid" "${SANDBOX}/serverpid"
+    cat > "${SANDBOX}/ttychild.sh" <<'CHILD'
+cd "$1" || exit 1
+log() { printf '[rust] %s\n' "$*" >> tty.log; }
+rcon_up() { return 0; }
+rcon_send() { printf '%s\n' "$1" >> rcon; }
+. ./lifted.sh
+stty -icanon min 0 time 0 -echo
+rust_launch sh -c 'if (exec 9<>/dev/tty) 2>/dev/null; then echo tty; else echo none; fi > ttyprobe; echo $$ > stubpid'
+wait "${SERVER_PID}"
+printf '%s\n' "${SERVER_PID}" > serverpid
+sleep 1
+BRIDGE_EOF_SLEEP=0.1 console_bridge
+CHILD
+    cat > "${SANDBOX}/ttydrive.py" <<'DRIVE'
+import os, pty, select, sys, termios, time
+sandbox = sys.argv[1]
+pid, master = pty.fork()
+if pid == 0:
+    os.execvp("bash", ["bash", os.path.join(sandbox, "ttychild.sh"), sandbox])
+def pump(seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        r, _, _ = select.select([master], [], [], 0.05)
+        if r:
+            try:
+                os.read(master, 4096)
+            except OSError:
+                return
+pump(0.5)
+os.write(master, b"sta")          # lands while the tty is still -icanon min 0
+pump(1.5)
+os.write(master, b"tus\n")
+pump(0.5)
+os.write(master, b"oxide.version\n")
+pump(0.5)
+os.write(master, b"say hi\n")
+pump(1.0)
+canon = bool(termios.tcgetattr(master)[3] & termios.ICANON)
+with open(os.path.join(sandbox, "canon"), "w") as f:
+    f.write("icanon" if canon else "-icanon")
+os.kill(pid, 9)
+os.waitpid(pid, 0)
+DRIVE
+    timeout 20 python3 -I "${SANDBOX}/ttydrive.py" "${SANDBOX}" >/dev/null 2>&1
+    assert_eq "rust_launch leaves the server without a controlling terminal" "none" "$(cat "${SANDBOX}/ttyprobe" 2>/dev/null)"
+    assert_eq "SERVER_PID is the server itself, not a setsid wrapper" "$(cat "${SANDBOX}/stubpid" 2>/dev/null)" "$(cat "${SANDBOX}/serverpid" 2>/dev/null)"
+    assert_eq "the bridge puts the tty back into canonical mode" "icanon" "$(cat "${SANDBOX}/canon" 2>/dev/null)"
+    assert_eq "every command reaches RCON whole, a split one joined" "status|oxide.version|say hi" "$(paste -sd'|' "${SANDBOX}/rcon" 2>/dev/null)"
+else
+    printf '  skip tty bridge test: no python3\n'
+fi
+
+# 5. docker stop: tini delivers TERM, the trap forwards it to the server and the
+# supervisor must keep waiting while the server saves. `wait -n -p` interrupted
+# by a trapped signal leaves the variable unset, and set -u used to kill the
+# script on the spot ("waited: unbound variable"), the container with it.
+cat > "${SANDBOX}/saver.sh" <<'SRV'
+#!/bin/bash
+trap 'sleep 1; echo saved > "$1"; exit 0' TERM
+while :; do sleep 0.1; done
+SRV
+chmod +x "${SANDBOX}/saver.sh"
+rm -f "${SANDBOX}/saved"
+(
+    set -u
+    bridge_env
+    "${SANDBOX}/saver.sh" "${SANDBOX}/saved" &
+    SERVER_PID=$!
+    BRIDGE_PID=""
+    trap 'kill -TERM "${SERVER_PID}" 2>/dev/null' TERM INT
+    printf 'ready\n'
+    rust_supervise
+    printf 'EXIT_CODE=%s\n' "${EXIT_CODE}"
+) > "${SANDBOX}/stop.out" 2>&1 &
+SP=$!; PIDS+=("${SP}")
+wait_for 5 grep -q ready "${SANDBOX}/stop.out"
+sleep 0.3
+kill -TERM "${SP}"
+wait_for 10 grep -q EXIT_CODE "${SANDBOX}/stop.out"
+assert_not "a TERM during wait does not trip set -u" 'unbound variable' "${SANDBOX}/stop.out"
+assert_eq  "the supervisor waits for the server to finish saving" "saved" "$(cat "${SANDBOX}/saved" 2>/dev/null)"
+assert_has "the server's exit code after a TERM is passed through" '^EXIT_CODE=0$' "${SANDBOX}/stop.out"
+
+# 6. The RCON session. websocat is stubbed by a small server model: it logs each
+# connection, answers every command with an Identifier 1 reply, a broadcast log
+# line (Identifier 0) and Oxide's trailing empty Identifier 1 message. A burst
+# of commands must travel over one connection, every reply must be printed in
+# order and nothing else. A connection that dies is reopened for the next
+# command; a refused one makes rcon_send fail so the caller can fall back.
+RLIFT="${SANDBOX}/rcon.sh"
+: > "${RLIFT}"
+for fn in rcon_close rcon_session rcon_send console_bridge_line; do
+    sed -n "/^${fn}() {/,/^}$/p" "${SCRIPT}" >> "${RLIFT}"
+done
+mkdir -p "${SANDBOX}/bin"
+cat > "${SANDBOX}/bin/websocat" <<'WS'
+#!/bin/bash
+printf 'conn\n' >> "${WS_LOG}"
+[ -e "${WS_REFUSE}" ] && { echo "websocat: WebSocketError: WebSocket protocol error" >&2; exit 1; }
+while IFS= read -r req; do
+    msg="$(jq -r .Message <<< "${req}")"
+    printf '{"Message":"log line","Identifier":0,"Type":"Generic"}\n'
+    jq -cn --arg m "reply:${msg}" '{Message: $m, Identifier: 1, Type: "Generic"}'
+    printf '{"Message":"","Identifier":1,"Type":"Generic"}\n'
+done
+WS
+chmod +x "${SANDBOX}/bin/websocat"
+rm -f "${SANDBOX}/wslog" "${SANDBOX}/refuse"
+(
+    export PATH="${SANDBOX}/bin:${PATH}" WS_LOG="${SANDBOX}/wslog" WS_REFUSE="${SANDBOX}/refuse"
+    log() { printf '[rust] %s\n' "$*"; }
+    rcon_up() { return 0; }
+    RCON_URL="ws://stub/"; RCON_PID=""; RCON_IN=""; RCON_CONNECT_SETTLE=0.2
+    SERVER_PID=999999999
+    . "${RLIFT}"
+    trap '' PIPE
+    for c in g1 g2 g3 g4 g5 g6 g7 g8; do console_bridge_line "oxide.grant group default p.${c}"; done
+    sleep 1
+    printf 'burst-done\n' >> "${WS_LOG}"
+    kill "${RCON_PID}"; sleep 0.3
+    console_bridge_line "after-drop"
+    sleep 1
+    printf 'refuse\n' >> "${WS_LOG}"
+    rcon_close
+    : > "${WS_REFUSE}"
+    if rcon_send "refused"; then echo "SEND=ok"; else echo "SEND=fail"; fi
+    console_bridge_line "lost-cmd"
+) > "${SANDBOX}/session.out" 2>&1
+assert_eq  "every reply of the burst is printed, in order" "$(printf 'reply:oxide.grant group default p.g%s|' 1 2 3 4 5 6 7 8)" "$(grep '^reply:oxide' "${SANDBOX}/session.out" | tr '\n' '|')"
+assert_not "broadcast log lines are not echoed" '^log line$' "${SANDBOX}/session.out"
+assert_has "a dropped connection is reopened for the next command" '^reply:after-drop$' "${SANDBOX}/session.out"
+assert_eq  "one connection for the burst, one after the drop, two tries per refused command" "conn burst-done conn refuse conn conn conn conn" "$(paste -sd' ' "${SANDBOX}/wslog")"
+assert_has "a refused connection makes rcon_send fail" '^SEND=fail$' "${SANDBOX}/session.out"
+assert_has "the caller then reports the command as dropped" 'command dropped: lost-cmd' "${SANDBOX}/session.out"
 
 if [ "${FAILED}" -ne 0 ]; then
     printf 'FAILED\n'
