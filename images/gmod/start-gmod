@@ -366,32 +366,33 @@ fi
 
 # Network ping on the scoreboard (images/gmod/netping/README.md).
 #
-# The engine's ping is the netchan round trip, which includes waiting for the
-# server tick - at the egg's default tickrate of 22 that is 45 ms per tick, and
-# players compare the scoreboard with "ping" from cmd and see 40 vs 100. The
-# addon replaces Player:Ping with the ICMP round trip measured by
-# gmod-netping-probe where the player answers ICMP, and with an estimate
-# otherwise. It is copied over on every start so fixes reach every server on
-# its next restart; PTEROHOST_NETPING=0 removes it again.
-GMOD_NETPING_SRC="/usr/local/share/pterohost/gmod-netping"
-GMOD_NETPING_DST="/home/container/garrysmod/addons/pterohost_netping"
+# The script replaces Player:Ping with the round trip measured by
+# gmod-netping-probe, or with an estimate where the player does not answer
+# ICMP. It is copied to garrysmod/lua/autorun on every start so fixes reach
+# every server on its next restart; PTEROHOST_NETPING=0 removes it again.
+#
+# GMOD_NETPING_LEGACY is where the first release put it, as an addon folder.
+# It is removed on every start so the script never loads twice.
+GMOD_NETPING_SRC="/usr/local/share/pterohost/gmod-netping/lua/autorun/pterohost_netping.lua"
+GMOD_NETPING_DST="/home/container/garrysmod/lua/autorun/pterohost_netping.lua"
+GMOD_NETPING_LEGACY="/home/container/garrysmod/addons/pterohost_netping"
 GMOD_NETPING_DATA="/home/container/garrysmod/data/pterohost_netping"
 
 gmod_netping_install() {
+    rm -rf "${GMOD_NETPING_LEGACY}"
     if [ "${PTEROHOST_NETPING:-1}" = "0" ]; then
-        if [ -d "${GMOD_NETPING_DST}" ]; then
+        if [ -e "${GMOD_NETPING_DST}" ]; then
             rm -rf "${GMOD_NETPING_DST}" "${GMOD_NETPING_DATA}"
-            log "Network ping addon removed (PTEROHOST_NETPING=0) - the scoreboard shows the engine ping."
+            log "Network ping removed (PTEROHOST_NETPING=0) - the scoreboard shows the engine ping."
         fi
         return 1
     fi
-    [ -d /home/container/garrysmod ] && [ -d "${GMOD_NETPING_SRC}" ] || return 1
-    rm -rf "${GMOD_NETPING_DST}"
-    if mkdir -p "${GMOD_NETPING_DST}" && cp -R "${GMOD_NETPING_SRC}/." "${GMOD_NETPING_DST}/"; then
-        log "Network ping addon installed (set PTEROHOST_NETPING=0 to show the engine ping)."
+    [ -d /home/container/garrysmod ] && [ -f "${GMOD_NETPING_SRC}" ] || return 1
+    if mkdir -p "$(dirname "${GMOD_NETPING_DST}")" && cp -f "${GMOD_NETPING_SRC}" "${GMOD_NETPING_DST}"; then
+        log "Network ping installed (set PTEROHOST_NETPING=0 to show the engine ping)."
         return 0
     fi
-    log "WARN: could not install the network ping addon into garrysmod/addons."
+    log "WARN: could not install the network ping script into garrysmod/lua/autorun."
     return 1
 }
 

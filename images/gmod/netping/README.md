@@ -2,8 +2,8 @@
 
 Only `lua/autorun/pterohost_netping.lua` goes into the image; this README and
 the tests stay in the repository. The Lua file is copied into
-`garrysmod/addons/` and downloaded by every player's client, so it carries no
-comments - documentation lives here.
+`garrysmod/lua/autorun/` and downloaded by every player's client, so it carries
+no comments - documentation lives here.
 
 ## Why
 
@@ -17,9 +17,11 @@ ticks, so the network part has to be measured outside the engine.
 
 ## How
 
-- `start-gmod` copies the addon to `garrysmod/addons/pterohost_netping/` on
-  every start and runs `gmod-netping-probe` in the background.
-  `PTEROHOST_NETPING=0` removes the addon and skips the probe.
+- `start-gmod` copies the script to
+  `garrysmod/lua/autorun/pterohost_netping.lua` on every start and runs
+  `gmod-netping-probe` in the background. `PTEROHOST_NETPING=0` removes the
+  script and skips the probe. The `garrysmod/addons/pterohost_netping/` folder
+  used by the first release is removed on every start.
 - The addon writes the public IPv4 of every human player to
   `garrysmod/data/pterohost_netping/targets.txt` every 5 s and reads
   `rtt.txt` back.
