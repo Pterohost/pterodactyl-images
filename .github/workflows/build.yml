@@ -98,6 +98,11 @@ jobs:
       - name: images/rust/start-rust.test.sh
         run: bash images/rust/start-rust.test.sh
 
+      - name: images/gmod/netping.test.sh
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends luajit
+          bash images/gmod/netping.test.sh
+
   # steamcmd_base builds on its own rather than as one leg of the big matrix.
   # The nine game images are FROM it, so they used to wait on `needs: build` -
   # the whole 19-tag matrix, java_26_ea and a Docker Hub timeout included. One

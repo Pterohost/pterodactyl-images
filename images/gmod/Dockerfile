@@ -28,8 +28,21 @@ USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         lib32gcc-s1 lib32stdc++6 libcurl4t64:i386 libncurses6:i386 libtinfo6:i386 \
-        libsdl2-2.0-0:i386 \
+        libsdl2-2.0-0:i386 iputils-ping \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
+
+# Network ping on the scoreboard - see images/gmod/netping/README.md. The ping
+# copy drops any cap_net_raw file capability: the daemon removes NET_RAW from
+# the container, and exec of a binary asking for a capability outside the
+# bounding set fails with EPERM. Without it ping uses unprivileged ICMP
+# sockets. Only the Lua addon is copied - the README stays in the repository.
+# No --chmod on the addon COPY: BuildKit applies it to the parent directories
+# it creates as well, and a 644 directory cannot be entered by the container
+# user, so start-gmod silently found no addon to install.
+RUN cp /usr/bin/ping /usr/local/bin/pterohost-ping && chmod 755 /usr/local/bin/pterohost-ping
+COPY images/gmod/netping/lua /usr/local/share/pterohost/gmod-netping/lua
+RUN chmod -R u=rwX,go=rX /usr/local/share/pterohost/gmod-netping
+COPY --chmod=755 images/gmod/gmod-netping-probe /usr/local/bin/gmod-netping-probe
 
 ENV PTEROHOST_IMAGE=gmod \
     PTEROHOST_RUNTIME="Garry's Mod - srcds (x86-64 branch)" \

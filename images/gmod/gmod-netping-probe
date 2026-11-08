@@ -1,0 +1,82 @@
+#!/bin/bash
+# gmod-netping-probe <watch-pid> <data-dir>
+#
+# ICMP half of the pterohost_netping addon (images/gmod/netping/README.md).
+# The addon writes the public IPv4 of every connected player to
+# <data-dir>/targets.txt; this loop pings each one and publishes the minimum
+# RTT as "<ip> <rtt_ms> <unix_ts>" lines in <data-dir>/rtt.txt, which the
+# addon reads back. It stops when <watch-pid> (srcds, after start-gmod's exec)
+# goes away.
+#
+# The container runs without CAP_NET_RAW, so this only works through
+# unprivileged ICMP datagram sockets (net.ipv4.ping_group_range, which Docker
+# opens for every bridge-networked container). PTEROHOST_PING is a copy of
+# iputils ping with the file capability stripped: a binary that carries
+# cap_net_raw in its xattrs fails exec with EPERM when the capability is not
+# in the container's bounding set.
+#
+# If ICMP is not allowed the probe says so once and exits; the addon then
+# falls back to its estimate.
+
+set -u
+
+WATCH_PID="${1:?watch pid}"
+DIR="${2:?data dir}"
+PING="${PTEROHOST_PING:-/usr/local/bin/pterohost-ping}"
+INTERVAL="${NETPING_INTERVAL:-5}"
+MAX_TARGETS="${NETPING_MAX_TARGETS:-128}"
+
+netping_log() { printf '[Pterohost] %s\n' "$*"; }
+
+# netping_min_rtt <ping output>
+#   Prints the minimum RTT in ms from the iputils summary line
+#   "rtt min/avg/max/mdev = 38.104/39.002/40.117/0.812 ms", nothing otherwise.
+netping_min_rtt() {
+    printf '%s\n' "$1" | sed -n 's#^.*min/avg/max/mdev = \([0-9.][0-9.]*\)/.*$#\1#p' | head -n 1
+}
+
+# netping_valid_ip <ip>
+netping_valid_ip() {
+    [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]
+}
+
+netping_probe_one() {
+    local ip="$1" out rtt
+    out="$("${PING}" -n -q -c 3 -i 0.2 -W 1 "${ip}" 2>/dev/null)" || true
+    rtt="$(netping_min_rtt "${out}")"
+    [ -n "${rtt}" ] && printf '%s %s %s\n' "${ip}" "${rtt}" "$(date +%s)"
+}
+
+netping_main() {
+    if [ ! -x "${PING}" ]; then
+        netping_log "netping: ${PING} is missing - player ping is estimated from the engine."
+        return 0
+    fi
+    if ! "${PING}" -n -q -c 1 -W 1 127.0.0.1 >/dev/null 2>&1; then
+        netping_log "netping: ICMP is not permitted in this container - player ping is estimated from the engine."
+        return 0
+    fi
+
+    mkdir -p "${DIR}" 2>/dev/null || return 0
+    rm -f "${DIR}/rtt.txt" "${DIR}/rtt.tmp" "${DIR}/targets.txt"
+
+    local ips ip
+    while kill -0 "${WATCH_PID}" 2>/dev/null; do
+        if [ -s "${DIR}/targets.txt" ]; then
+            mapfile -t ips < <(tr -d '\r' < "${DIR}/targets.txt" | sort -u | head -n "${MAX_TARGETS}")
+            : > "${DIR}/rtt.tmp"
+            for ip in "${ips[@]}"; do
+                netping_valid_ip "${ip}" || continue
+                netping_probe_one "${ip}" >> "${DIR}/rtt.tmp" &
+            done
+            wait
+            mv -f "${DIR}/rtt.tmp" "${DIR}/rtt.txt"
+        fi
+        sleep "${INTERVAL}"
+    done
+}
+
+# Sourced by the test: functions only.
+[ "${NETPING_SOURCE_ONLY:-0}" = "1" ] && return 0 2>/dev/null
+
+netping_main
