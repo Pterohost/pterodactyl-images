@@ -40,6 +40,7 @@ Keep Pterodactyl egg exports in the internal panel repository; do not commit
 | `steamcmd_base` | SteamCMD + tini + locales | debian:12-slim | amd64 | Shared base for the game images below. Not useful on its own. |
 | `steamcmd_base_trixie` | SteamCMD + tini + locales | debian:13-slim | amd64 | The same base on glibc 2.41, built from the same Dockerfile (`BASE_IMAGE`). For games whose binaries need more than glibc 2.36 - currently `gmod`. |
 | `plains_of_pain` | Plains of Pain (native Linux / Unity) | `steamcmd_base` | amd64 | Steam app `2227360`. Persistent JSON/worlds, two allocated UDP ports, SIGINT saves. [Runtime and NAT guide](images/plains-of-pain/README.md). |
+| `ss14` | Space Station 14 under SS14.Watchdog (.NET 10 / ASP.NET) | mcr `dotnet/aspnet:10.0` | amd64 | Manifest or ZIP builds, automatic updates at round end, GC tuned to the plan, SQLite or PostgreSQL. One allocation (UDP game + TCP status). [Guide](images/ss14/README.md). |
 | `sbox` | s&box dedicated server (SteamCMD + Wine) | ubuntu:24.04 | amd64 | Steam app `1892930`, anonymous SteamCMD. See below. |
 | `rust` | RustDedicated (native Linux) | debian:12-slim | amd64 | Steam app `258550`, Oxide / Carbon / vanilla. See below. |
 | `zomboid` | Project Zomboid dedicated server | `steamcmd_base` | amd64 | Steam app `380870`. cgroup-aware JVM heap, RCON, save-on-stop. See below. |

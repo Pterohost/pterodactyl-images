@@ -107,6 +107,9 @@ jobs:
       - name: images/enshrouded/start-enshrouded.test.sh
         run: bash images/enshrouded/start-enshrouded.test.sh
 
+      - name: images/ss14/start-ss14.test.sh
+        run: bash images/ss14/start-ss14.test.sh
+
       - name: images/gmod/netping.test.sh
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends luajit
@@ -244,6 +247,12 @@ jobs:
             dir: vintagestory
             # FROM yolks:dotnet_10 - the game is not a Steam app; .NET 8 is
             # added for releases before 1.22.
+            platforms: linux/amd64
+          - tag: ss14
+            dir: ss14
+            # FROM the Microsoft aspnet:10.0 image; SS14.Watchdog is built from
+            # a pinned upstream commit in a multi-stage build. Needs ASP.NET,
+            # which the yolks dotnet images used elsewhere do not carry.
             platforms: linux/amd64
           - tag: enshrouded
             dir: enshrouded

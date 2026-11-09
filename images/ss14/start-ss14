@@ -1,0 +1,551 @@
+#!/bin/bash
+# Pterohost Space Station 14 bootstrap.
+#
+# Runs SS14.Watchdog, which in turn downloads, updates, starts and restarts the
+# game server (Robust.Server). The command line lives in the egg
+# (shared/launch.sh contract):
+#
+#     start-ss14 SS14.Watchdog {{ADDITIONAL_ARGS}}
+#
+# Everything after the watchdog's name is handed to the GAME SERVER as extra
+# arguments (for example `--cvar game.lobbyenabled=false`); the watchdog itself
+# needs no flags. This script adds what a static startup string cannot express:
+#
+#   1. The watchdog's configuration. It normally lives in appsettings.yml next
+#      to the executable, which here is the image's read-only /opt tree. The
+#      same keys are read from the environment, so nothing is written to disk:
+#      one instance ("ss14"), the update source, the token, the timeouts.
+#
+#   2. The server's settings, as ROBUST_CVAR_* environment variables. They sit
+#      above instances/ss14/config.toml, so the panel's variables (name, slots,
+#      database, hub) always win while every other setting stays the owner's to
+#      edit in that file.
+#
+#   3. The update source. A manifest URL is the vendor's own mechanism and
+#      follows forks; a ZIP URL covers a fork with no manifest. With automatic
+#      updates off, a server that is already installed is pinned: the watchdog
+#      gets its "Dummy" provider, which never touches bin/.
+#
+#   4. The .NET GC heap ceiling. In a memory-limited container .NET caps the
+#      heap at 75% of the limit; SS14's memory outside the managed heap is
+#      small, so a plan sits with a quarter unused while the heap runs
+#      blocking collections at its ceiling. SS14_GC_HEAP_PERCENT (default 85)
+#      moves it. An explicit DOTNET_GCHeapHardLimit* from the owner always wins.
+#      It is set for the game server only, not for the watchdog.
+#
+#   5. Automatic update checks while the server runs. The watchdog only checks
+#      at start and when asked; a background loop asks every
+#      SS14_UPDATE_CHECK_MINUTES (default 30). The server then restarts itself
+#      at the end of the round, never in the middle of one.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
+
+log() { pterohost_log "$@"; }
+err() { printf '\033[0;31m[pterohost] ERROR:\033[0m %s\n' "$*" >&2; }
+
+PTEROHOST_ARGS_VAR=ADDITIONAL_ARGS
+
+SS14_KEY=ss14
+SS14_DEFAULT_MANIFEST="https://wizards.cdn.spacestation14.com/fork/wizards/manifest"
+SS14_STATE_DIR="/home/container/.ss14"
+SS14_INSTANCE_DIR="/home/container/instances/${SS14_KEY}"
+
+# ss14_is_int <value> <min> <max>
+ss14_is_int() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#1}" -le 9 ] || return 1
+    [ "$1" -ge "$2" ] && [ "$1" -le "$3" ]
+}
+
+# ss14_is_flag <value>   accepts 1/0/true/false/yes/no, case-insensitive
+ss14_flag() {
+    case "${1,,}" in
+        1|true|yes|on) echo 1 ;;
+        *) echo 0 ;;
+    esac
+}
+
+# ss14_http_url <value>
+ss14_http_url() {
+    case "$1" in
+        http://?*|https://?*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *[[:space:]\"\'\`\\\$]*) return 1 ;;
+    esac
+    return 0
+}
+
+# ss14_validate
+#   Prints one error per problem and returns 1. Bad input must stop the start
+#   with a sentence the owner can act on, not reach the watchdog as a value it
+#   then fails to parse.
+ss14_validate() {
+    local bad=0
+
+    ss14_is_int "${SERVER_PORT:-}" 1 65535 || { err "SERVER_PORT must be 1-65535 (the primary allocation)."; bad=1; }
+    ss14_is_int "${MAX_PLAYERS:-30}" 1 1000 || { err "Player slots must be a number from 1 to 1000."; bad=1; }
+
+    case "${DB_ENGINE:-sqlite}" in
+        sqlite|postgres) ;;
+        *) err "Database must be 'sqlite' or 'postgres'."; bad=1 ;;
+    esac
+    if [ "${DB_ENGINE:-sqlite}" = "postgres" ]; then
+        [ -n "${PG_HOST:-}" ] || { err "PostgreSQL host is empty."; bad=1; }
+        [ -n "${PG_DATABASE:-}" ] || { err "PostgreSQL database name is empty."; bad=1; }
+        ss14_is_int "${PG_PORT:-5432}" 1 65535 || { err "PostgreSQL port must be 1-65535."; bad=1; }
+    fi
+
+    if [ -n "${MANIFEST_URL:-}" ] && ! ss14_http_url "${MANIFEST_URL}"; then
+        err "Manifest URL must be an http(s) address without spaces or quotes."
+        bad=1
+    fi
+    if [ -n "${SERVER_ZIP_URL:-}" ] && ! ss14_http_url "${SERVER_ZIP_URL}"; then
+        err "Server ZIP URL must be an http(s) address without spaces or quotes."
+        bad=1
+    fi
+
+    ss14_is_int "${SS14_UPDATE_CHECK_MINUTES:-30}" 1 1440 || { err "SS14_UPDATE_CHECK_MINUTES must be 1-1440."; bad=1; }
+    ss14_is_int "${SS14_TIMEOUT_SECONDS:-180}" 30 3600 || { err "SS14_TIMEOUT_SECONDS must be 30-3600."; bad=1; }
+
+    [ "${bad}" = 0 ]
+}
+
+# ss14_hard_cap <slots>
+#   net.max_connections is Lidgren's hard limit and nobody can pass it, admins
+#   included; game.soft_max_players is the one players are held to. The hard
+#   cap leaves a little room above the slots so an administrator can still
+#   join a full server.
+ss14_hard_cap() {
+    local slots="$1" extra
+    extra=$(( slots / 10 ))
+    [ "${extra}" -ge 2 ] || extra=2
+    echo $(( slots + extra ))
+}
+
+# ss14_watchdog_port
+#   The watchdog's own HTTP API, loopback only. It must not share a number with
+#   the game's status port, which is bound on every interface.
+ss14_watchdog_port() {
+    local port="${SS14_WATCHDOG_PORT:-5000}"
+    if [ "${port}" = "${SERVER_PORT:-}" ]; then
+        port=$(( port + 1 ))
+    fi
+    echo "${port}"
+}
+
+# ss14_gc_env
+#   Prints KEY=VALUE lines for the game server's environment. The runtime
+#   reads DOTNET_GC* values as hexadecimal.
+ss14_gc_env() {
+    local pct="${SS14_GC_HEAP_PERCENT:-85}"
+    if env | grep -q -E '^(DOTNET|COMPlus)_GCHeapHardLimit'; then
+        log "GC heap limit: taken from the server's own DOTNET_GCHeapHardLimit setting." >&2
+        return 0
+    fi
+    case "${pct}" in
+        ''|0|off) log "GC heap limit: .NET default (75% of the plan)." >&2; return 0 ;;
+    esac
+    if ! ss14_is_int "${pct}" 50 95; then
+        log "WARN: SS14_GC_HEAP_PERCENT=${pct} is outside 50-95 - using 85." >&2
+        pct=85
+    fi
+    printf 'DOTNET_GCHeapHardLimitPercent=%s\n' "$(printf '0x%x' "${pct}")"
+    log "GC heap limit: ${pct}% of the plan's memory." >&2
+}
+
+# ss14_cpu_milli
+#   The container's CPU quota in thousandths of a core (cgroup v2, then v1),
+#   or the host's cores when there is no quota. nproc reports the host.
+ss14_cpu_milli() {
+    local q="" p="" milli=""
+    if [ -r /sys/fs/cgroup/cpu.max ]; then
+        read -r q p < /sys/fs/cgroup/cpu.max 2>/dev/null
+        if [ "${q}" != "max" ] && [ -n "${q}" ] && [ -n "${p}" ] && [ "${p}" -gt 0 ] 2>/dev/null; then
+            milli=$(( q * 1000 / p ))
+        fi
+    elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ] && [ -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]; then
+        q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null)
+        p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null)
+        if [ -n "${q}" ] && [ "${q}" -gt 0 ] 2>/dev/null && [ -n "${p}" ] && [ "${p}" -gt 0 ] 2>/dev/null; then
+            milli=$(( q * 1000 / p ))
+        fi
+    fi
+    if [ -z "${milli}" ] || [ "${milli}" -lt 1 ] 2>/dev/null; then
+        milli=$(( $(nproc 2>/dev/null || echo 1) * 1000 ))
+    fi
+    echo "${milli}"
+}
+
+# ss14_gc_mode_env
+#   The game ships with the server GC (one heap and one collector thread per
+#   core). On a plan of two cores or less that spends memory and threads the
+#   plan does not have; the workstation GC is the better fit there. SS14_GC_MODE
+#   = auto (default), server or workstation.
+ss14_gc_mode_env() {
+    local mode="${SS14_GC_MODE:-auto}"
+    case "${mode}" in
+        auto) [ "$(ss14_cpu_milli)" -le 2000 ] && mode=workstation || mode=server ;;
+        server|workstation) ;;
+        *) log "WARN: SS14_GC_MODE=${mode} is not auto, server or workstation - using auto." >&2
+           [ "$(ss14_cpu_milli)" -le 2000 ] && mode=workstation || mode=server ;;
+    esac
+    if [ "${mode}" = workstation ]; then
+        printf 'DOTNET_gcServer=0\nDOTNET_gcConcurrent=1\n'
+        log "GC mode: workstation (plan of two cores or less)." >&2
+    else
+        log "GC mode: server." >&2
+    fi
+}
+
+# ss14_perf_env
+#   Prints KEY=VALUE lines. The vendor's performance recommendation (full
+#   dynamic PGO) trades extra start-up CPU for steadier ticks later;
+#   SS14_FULL_PGO=0 keeps the stock settings.
+ss14_perf_env() {
+    if [ "$(ss14_flag "${SS14_FULL_PGO:-1}")" = 1 ]; then
+        printf 'DOTNET_TieredPGO=1\nDOTNET_TC_QuickJitForLoops=1\nDOTNET_ReadyToRun=0\n'
+    fi
+}
+
+# ss14_update_mode
+#   zip | manifest | pinned
+ss14_update_mode() {
+    if [ -n "${SERVER_ZIP_URL:-}" ]; then
+        echo zip
+    elif [ "$(ss14_flag "${AUTO_UPDATE:-1}")" = 0 ] && [ -x "${SS14_INSTANCE_DIR}/bin/Robust.Server" ]; then
+        echo pinned
+    else
+        echo manifest
+    fi
+}
+
+# ss14_token
+#   The watchdog API token is the owner's to never see. WATCHDOG_TOKEN from the
+#   panel wins when set; otherwise one is generated on first start and kept.
+ss14_token() {
+    local file="${SS14_STATE_DIR}/api-token" token
+    mkdir -p "${SS14_STATE_DIR}" || return 1
+    token="${WATCHDOG_TOKEN:-}"
+    if [ -z "${token}" ] && [ -s "${file}" ]; then
+        return 0
+    fi
+    if [ -z "${token}" ]; then
+        token="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+    fi
+    ( umask 077; printf '%s' "${token}" > "${file}.tmp" ) && mv -f "${file}.tmp" "${file}"
+}
+
+# ss14_prepare_dirs
+ss14_prepare_dirs() {
+    mkdir -p "${SS14_INSTANCE_DIR}/bin" "${SS14_INSTANCE_DIR}/data" "${SS14_STATE_DIR}" || return 1
+    # Scratch space on the volume rather than /tmp: the platform mounts /tmp as
+    # a small tmpfs and a server download is tens of megabytes.
+    rm -rf /home/container/.tmp
+    mkdir -p /home/container/.tmp || return 1
+    # The server writes one log file per start and never prunes them.
+    find "${SS14_INSTANCE_DIR}/data/logs" -type f -name '*.log' -mtime +"${SS14_LOG_KEEP_DAYS:-14}" -delete 2>/dev/null || true
+}
+
+# ss14_write_config_toml
+#   Created once, never rewritten: it is the owner's file. The panel's own
+#   settings are applied above it as environment variables.
+ss14_write_config_toml() {
+    local file="${SS14_INSTANCE_DIR}/config.toml"
+    [ -e "${file}" ] && return 0
+    cat > "${file}" <<'EOF'
+# Space Station 14 server settings. Edit freely: the server reads this file at
+# every start. Settings that have a field in the control panel (server name,
+# player slots, database, hub listing) are taken from the panel instead and
+# override anything written here for those keys.
+#
+# Reference: https://docs.spacestation14.com/en/general-development/tips/config-file-reference.html
+#
+# [game]
+# lobbyenabled = true
+#
+# [net]
+# tickrate = 30
+EOF
+}
+
+# ss14_zip_install
+#   Downloads SERVER_ZIP_URL into instances/ss14/bin when it is not there yet,
+#   the address changed, or automatic updates are on and the file changed.
+ss14_zip_install() {
+    local url="${SERVER_ZIP_URL}" bin="${SS14_INSTANCE_DIR}/bin"
+    local marker="${SS14_STATE_DIR}/zip-source" stored_url="" stored_tag="" tag="" need=0
+    local tmpzip=/home/container/.tmp/server.zip stage=/home/container/.tmp/stage
+
+    if [ -f "${marker}" ]; then
+        { read -r stored_url; read -r stored_tag; } < "${marker}" || true
+    fi
+    tag="$(curl -fsSIL -m 20 "${url}" 2>/dev/null | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"||tolower($1)=="last-modified"{print $2}' | tr '\n' ' ')"
+
+    if [ ! -x "${bin}/Robust.Server" ]; then
+        need=1
+    elif [ "${stored_url}" != "${url}" ]; then
+        need=1
+    elif [ "$(ss14_flag "${AUTO_UPDATE:-1}")" = 1 ] && [ -n "${tag}" ] && [ "${tag}" != "${stored_tag}" ]; then
+        need=1
+    fi
+    [ "${need}" = 1 ] || { log "Server build: ZIP unchanged."; return 0; }
+
+    log "Server build: downloading the ZIP build."
+    rm -rf "${tmpzip}" "${stage}"
+    mkdir -p "${stage}" || return 1
+    if ! curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 -o "${tmpzip}" "${url}"; then
+        err "Could not download the server ZIP."
+        [ -x "${bin}/Robust.Server" ] && { log "Keeping the installed build."; return 0; }
+        return 1
+    fi
+    if ! unzip -tq "${tmpzip}" >/dev/null 2>&1; then
+        err "The downloaded file is not a valid ZIP archive."
+        [ -x "${bin}/Robust.Server" ] && { log "Keeping the installed build."; return 0; }
+        return 1
+    fi
+    unzip -q -o "${tmpzip}" -d "${stage}" || return 1
+    # A build zipped as one top-level folder.
+    if [ ! -e "${stage}/Robust.Server" ]; then
+        local only
+        only="$(find "${stage}" -mindepth 1 -maxdepth 1 -type d)"
+        if [ "$(printf '%s\n' "${only}" | grep -c .)" = 1 ] && [ -e "${only}/Robust.Server" ]; then
+            stage="${only}"
+        fi
+    fi
+    if [ ! -e "${stage}/Robust.Server" ]; then
+        err "The ZIP has no Robust.Server in it - it must be a Linux x64 server build."
+        [ -x "${bin}/Robust.Server" ] && { log "Keeping the installed build."; return 0; }
+        return 1
+    fi
+    chmod +x "${stage}/Robust.Server"
+    rm -rf "${bin}.old"
+    [ -e "${bin}" ] && mv "${bin}" "${bin}.old"
+    mv "${stage}" "${bin}" || return 1
+    rm -rf "${bin}.old" "${tmpzip}"
+    printf '%s\n%s\n' "${url}" "${tag}" > "${marker}"
+    log "Server build: installed from the ZIP."
+}
+
+# ss14_write_appsettings
+#   The watchdog's appsettings.yml is read AFTER the environment, so it cannot be
+#   overridden from there. The shipped one logs every ping at Information and
+#   the whole SS14 namespace at Debug, which fills the owner's console with a
+#   line every fifteen seconds. This one keeps the console to what matters.
+#   It is rewritten at every start; the instance settings come from the
+#   environment (see ss14_export_watchdog_env), not from this file.
+ss14_write_appsettings() {
+    local dir="${SS14_STATE_DIR}/watchdog"
+    mkdir -p "${dir}" || return 1
+    cat > "${dir}/appsettings.yml.tmp" <<'EOF'
+Serilog:
+  Using: [ "Serilog.Sinks.Console" ]
+  MinimumLevel:
+    Default: Information
+    Override:
+      SS14: Information
+      Microsoft: Warning
+      Microsoft.Hosting.Lifetime: Information
+      Microsoft.AspNetCore: Warning
+      Serilog.AspNetCore: Warning
+  WriteTo:
+    - Name: Console
+      Args:
+        OutputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3} {SourceContext}] {Message:lj}{NewLine}{Exception}"
+AllowedHosts: "*"
+EOF
+    mv -f "${dir}/appsettings.yml.tmp" "${dir}/appsettings.yml"
+}
+
+# ss14_reset_watchdog_state <mode>
+#   The watchdog remembers the build it installed in its own database. The
+#   manifest provider stores a version id, the "Dummy" provider counts
+#   upwards and cannot parse an id, so switching between them leaves it
+#   throwing on every start (the vendor's docs: "delete data.json"). The
+#   database holds nothing else worth keeping - the game's data is separate.
+ss14_reset_watchdog_state() {
+    local kind=dummy marker="${SS14_STATE_DIR}/update-kind" previous=""
+    [ "$1" = manifest ] && kind=manifest
+    [ -f "${marker}" ] && previous="$(cat "${marker}" 2>/dev/null)"
+    if [ "${previous}" != "${kind}" ]; then
+        [ -z "${previous}" ] || log "Update source changed (${previous} -> ${kind}); resetting the watchdog's build record."
+        rm -f "${SS14_STATE_DIR}/watchdog.db" "${SS14_STATE_DIR}/watchdog.db-wal" "${SS14_STATE_DIR}/watchdog.db-shm"
+        printf '%s' "${kind}" > "${marker}"
+    fi
+}
+
+# ss14_export_watchdog_env <mode> <token-file> <wd-port> <extra args...>
+#   The watchdog reads its configuration from appsettings.yml and, above it,
+#   from the environment (double underscore is the section separator).
+ss14_export_watchdog_env() {
+    local mode="$1" tokenfile="$2" wdport="$3"
+    shift 3
+    local prefix="Servers__Instances__${SS14_KEY}"
+    local index=0 arg line
+
+    export DOTNET_CONTENTROOT="${SS14_STATE_DIR}/watchdog"
+    # The runtime image listens on 8080 unless told otherwise; the watchdog's
+    # own address below is the only one wanted.
+    unset ASPNETCORE_HTTP_PORTS ASPNETCORE_HTTPS_PORTS
+    export ASPNETCORE_URLS="http://127.0.0.1:${wdport}"
+    export BaseUrl="http://127.0.0.1:${wdport}/"
+    export Data__File=".ss14/watchdog.db"
+    export Process__PersistServers=false
+
+    export "${prefix}__Name=${SERVER_NAME:-Space Station 14}"
+    export "${prefix}__ApiTokenFile=${tokenfile}"
+    # The watchdog reaches the game server's status API on the game port.
+    export "${prefix}__ApiPort=${SERVER_PORT}"
+    export "${prefix}__TimeoutSeconds=${SS14_TIMEOUT_SECONDS:-180}"
+    # A dump of a frozen server is gigabytes written to the owner's disk.
+    export "${prefix}__DumpOnTimeout=false"
+
+    case "${mode}" in
+        manifest)
+            export "${prefix}__UpdateType=Manifest"
+            export "${prefix}__Updates__ManifestUrl=${MANIFEST_URL:-${SS14_DEFAULT_MANIFEST}}"
+            ;;
+        *)
+            export "${prefix}__UpdateType=Dummy"
+            ;;
+    esac
+
+    # Environment of the game server only.
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        export "${prefix}__EnvironmentVariables__${line}"
+    done < <(ss14_gc_env; ss14_gc_mode_env; ss14_perf_env)
+
+    for arg in "$@"; do
+        export "${prefix}__Arguments__${index}=${arg}"
+        index=$(( index + 1 ))
+    done
+}
+
+# ss14_export_cvars
+#   The panel-owned server settings as ROBUST_CVAR_<name>, where __ stands for
+#   a dot. The watchdog's child process inherits them.
+ss14_export_cvars() {
+    local slots="${MAX_PLAYERS:-30}"
+
+    export ROBUST_CVAR_net__port="${SERVER_PORT}"
+    # Bind IPv4 only: the platform hands the container no IPv6 address, and the
+    # default "0.0.0.0,::" makes the server log a bind failure on every start.
+    export ROBUST_CVAR_net__bindto="0.0.0.0"
+    export ROBUST_CVAR_game__hostname="${SERVER_NAME:-Space Station 14}"
+    export ROBUST_CVAR_game__soft_max_players="${slots}"
+    export ROBUST_CVAR_net__max_connections="$(ss14_hard_cap "${slots}")"
+
+    export ROBUST_CVAR_hub__advertise="$([ "$(ss14_flag "${HUB_ADVERTISE:-0}")" = 1 ] && echo true || echo false)"
+    [ -z "${HUB_TAGS:-}" ] || export ROBUST_CVAR_hub__tags="${HUB_TAGS}"
+
+    # An address that arrives from outside is never a loopback one, but there is
+    # no reason to leave the door as the engine's default.
+    export ROBUST_CVAR_console__loginlocal=false
+    [ -z "${ADMIN_USER:-}" ] || export ROBUST_CVAR_console__login_host_user="${ADMIN_USER}"
+
+    export ROBUST_CVAR_database__engine="${DB_ENGINE:-sqlite}"
+    if [ "${DB_ENGINE:-sqlite}" = "postgres" ]; then
+        export ROBUST_CVAR_database__pg_host="${PG_HOST}"
+        export ROBUST_CVAR_database__pg_port="${PG_PORT:-5432}"
+        export ROBUST_CVAR_database__pg_database="${PG_DATABASE}"
+        export ROBUST_CVAR_database__pg_username="${PG_USER:-postgres}"
+        export ROBUST_CVAR_database__pg_password="${PG_PASSWORD:-}"
+    fi
+}
+
+# ss14_update_loop <wd-port> <token-file>
+#   Asks the watchdog whether a newer build exists. If one does, it tells the
+#   running server, which restarts at the end of the round.
+ss14_update_loop() {
+    local wdport="$1" tokenfile="$2"
+    local interval=$(( ${SS14_UPDATE_CHECK_MINUTES:-30} * 60 )) token
+
+    sleep 120
+    while :; do
+        token="$(cat "${tokenfile}" 2>/dev/null || true)"
+        if [ -n "${token}" ]; then
+            printf 'user = "%s:%s"\n' "${SS14_KEY}" "${token}" \
+                | curl -fsS -m 15 -K - -X POST -o /dev/null \
+                    "http://127.0.0.1:${wdport}/instances/${SS14_KEY}/update" 2>/dev/null \
+                || true
+        fi
+        sleep "${interval}"
+    done
+}
+
+# Sourced by the test: functions only.
+[ "${SS14_SOURCE_ONLY:-0}" = "1" ] && return 0 2>/dev/null
+
+if ! ss14_validate; then
+    err "Fix the settings above in the server's Startup tab and start again."
+    exit 1
+fi
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=(SS14.Watchdog)
+fi
+
+# Rule 1 (pass-through): a startup line that does not name the watchdog is run
+# exactly as written.
+case "${PTEROHOST_ARGS[0]##*/}" in
+    SS14.Watchdog) ;;
+    *)
+        pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+        exec "${PTEROHOST_ARGS[@]}"
+        ;;
+esac
+
+SERVER_EXTRA_ARGS=("${PTEROHOST_ARGS[@]:1}")
+
+if [ "${SERVER_MEMORY:-0}" -gt 0 ] 2>/dev/null && [ "${SERVER_MEMORY}" -lt 2048 ]; then
+    log "WARN: ${SERVER_MEMORY} MB is little for Space Station 14 - 3 GB or more is comfortable for a lively round."
+fi
+
+ss14_prepare_dirs || { err "Could not prepare /home/container."; exit 1; }
+ss14_token || { err "Could not store the watchdog token."; exit 1; }
+ss14_write_config_toml
+ss14_write_appsettings || { err "Could not write the watchdog settings."; exit 1; }
+
+export TMPDIR=/home/container/.tmp
+
+MODE="$(ss14_update_mode)"
+case "${MODE}" in
+    zip)
+        ss14_zip_install || { err "No server build is available. Check the Server ZIP URL."; exit 1; }
+        log "Updates: ZIP build (checked at start$([ "$(ss14_flag "${AUTO_UPDATE:-1}")" = 1 ] && echo ', changes are picked up on restart'))."
+        ;;
+    manifest)
+        log "Updates: manifest ${MANIFEST_URL:-${SS14_DEFAULT_MANIFEST}}"
+        ;;
+    pinned)
+        log "Updates: off - the installed build is kept. Turn automatic updates on to move to the newest one."
+        ;;
+esac
+
+ss14_reset_watchdog_state "${MODE}"
+WD_PORT="$(ss14_watchdog_port)"
+ss14_export_watchdog_env "${MODE}" "${SS14_STATE_DIR}/api-token" "${WD_PORT}" "${SERVER_EXTRA_ARGS[@]}"
+ss14_export_cvars
+
+log "Game: UDP and TCP ${SERVER_PORT}; slots ${MAX_PLAYERS:-30}; database ${DB_ENGINE:-sqlite}; hub listing $([ "$(ss14_flag "${HUB_ADVERTISE:-0}")" = 1 ] && echo on || echo off)."
+if [ "${#SERVER_EXTRA_ARGS[@]}" -gt 0 ]; then
+    log "Extra server arguments: ${SERVER_EXTRA_ARGS[*]}"
+fi
+
+if [ "${MODE}" = "manifest" ] && [ "$(ss14_flag "${AUTO_UPDATE:-1}")" = 1 ]; then
+    ss14_update_loop "${WD_PORT}" "${SS14_STATE_DIR}/api-token" &
+fi
+
+WATCHDOG_BIN="${SS14_WATCHDOG_DIR:-/opt/ss14-watchdog}/SS14.Watchdog"
+# exec: the watchdog handles SIGINT and SIGTERM itself, asks the server to
+# exit, and waits for it.
+exec "${WATCHDOG_BIN}"
