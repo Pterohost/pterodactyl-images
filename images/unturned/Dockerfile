@@ -20,6 +20,12 @@ ENV PTEROHOST_IMAGE=unturned \
 
 COPY --chmod=755 images/unturned/start-unturned /usr/local/bin/start-unturned
 
+# Mono plugins (OpenMod and Rocket modules through MonoMod/Harmony) load the
+# unversioned name libdl.so, which Debian only ships with the -dev package.
+USER root
+RUN test -e /usr/lib/x86_64-linux-gnu/libdl.so.2 \
+    && ln -sf libdl.so.2 /usr/lib/x86_64-linux-gnu/libdl.so
+
 USER container
 WORKDIR /home/container
 
