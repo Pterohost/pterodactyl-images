@@ -357,6 +357,9 @@ Serilog:
   WriteTo:
     - Name: Console
       Args:
+        # No colour codes: the platform console is a terminal, and the default
+        # theme paints the brackets black on a dark background.
+        Theme: "Serilog.Sinks.SystemConsole.Themes.ConsoleTheme::None, Serilog.Sinks.Console"
         OutputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3} {SourceContext}] {Message:lj}{NewLine}{Exception}"
 AllowedHosts: "*"
 EOF

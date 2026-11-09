@@ -120,7 +120,7 @@ check "token generated" 1 "$([ "${#t1}" -ge 32 ] && echo 1 || echo 0)"
 check "token mode 600" 600 "$(stat -c %a "${SS14_TOKEN_FILE}")"
 ss14_token
 check "token fresh at every start" 1 "$([ "$(cat "${SS14_TOKEN_FILE}")" != "${t1}" ] && echo 1 || echo 0)"
-check "token never lands on the volume" 0 "$(find "${SS14_STATE_DIR}" -name 'api-token*' | grep -c .)"
+check "token never lands on the volume" 0 "$(find "${SS14_STATE_DIR}" -name 'api-token*' 2>/dev/null | grep -c .)"
 WATCHDOG_TOKEN=fromthepanel ss14_token
 check "panel token wins" fromthepanel "$(cat "${SS14_TOKEN_FILE}")"
 
@@ -137,6 +137,7 @@ ss14_write_appsettings
 as="${SS14_STATE_DIR}/watchdog/appsettings.yml"
 check "appsettings written" 1 "$([ -s "${as}" ] && echo 1 || echo 0)"
 check "request logging silenced" 1 "$(grep -q 'Serilog.AspNetCore: Warning' "${as}" && echo 1 || echo 0)"
+check "no colour codes in the console" 1 "$(grep -q 'ConsoleTheme::None' "${as}" && echo 1 || echo 0)"
 check "debug logging off" 0 "$(grep -c 'Debug' "${as}")"
 
 # --- resetting the watchdog's build record -------------------------------------
