@@ -31,6 +31,10 @@ pterohost_prune_empty_args PalServer Pal -port=27015 -queryport= -players=10
 check "UE style -flag= dropped" \
     "PalServer|Pal|-port=27015|-players=10|" "$(joined)"
 
+pterohost_prune_empty_args ./VintagestoryServer --port=42420 --maxclients=16 ""
+check "--flag=value before an empty argument is kept" \
+    "./VintagestoryServer|--port=42420|--maxclients=16|" "$(joined)"
+
 pterohost_prune_empty_args ./srcds_run +map gm_flatgrass +fps_max ""
 check "trailing empty pair dropped" \
     "./srcds_run|+map|gm_flatgrass|" "$(joined)"

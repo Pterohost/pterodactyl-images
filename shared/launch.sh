@@ -89,9 +89,12 @@ pterohost_prune_empty_args() {
                 ;;
         esac
 
-        # "+map" followed by an explicitly empty argument.
+        # "+map" followed by an explicitly empty argument. A "-flag=value"
+        # already carries its value, so the empty argument after it is not
+        # its value - it is dropped on its own below, the flag is kept.
         if [ $((index + 1)) -lt "${count}" ] && [ -z "${args[$((index + 1))]}" ]; then
             case "${current}" in
+                -*=* | +*=*) ;;
                 -* | +*)
                     pterohost_log "Dropping ${current} - no value set."
                     index=$((index + 2))
@@ -232,7 +235,7 @@ pterohost_log_cmd() {
     done
 
     printf '\n'
-    printf '\033[2m  Add your own flags with the ADDITIONAL_ARGS variable in the server settings.\033[0m\n'
+    printf '\033[2m  Add your own flags with the %s variable in the server settings.\033[0m\n' "${PTEROHOST_ARGS_VAR:-ADDITIONAL_ARGS}"
 }
 
 # pterohost_swap_binary <expected> <replacement>
