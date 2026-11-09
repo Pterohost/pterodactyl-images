@@ -101,6 +101,9 @@ jobs:
       - name: images/vintagestory/start-vintagestory.test.sh
         run: bash images/vintagestory/start-vintagestory.test.sh
 
+      - name: images/enshrouded/start-enshrouded.test.sh
+        run: bash images/enshrouded/start-enshrouded.test.sh
+
       - name: images/gmod/netping.test.sh
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends luajit
@@ -238,6 +241,11 @@ jobs:
             dir: vintagestory
             # FROM yolks:dotnet_10 - the game is not a Steam app; .NET 8 is
             # added for releases before 1.22.
+            platforms: linux/amd64
+          - tag: enshrouded
+            dir: enshrouded
+            # Windows-only server under GE-Proton; FROM ubuntu:24.04 for the
+            # same glibc reason as palworld_proton.
             platforms: linux/amd64
           - tag: gmod_classic
             dir: gmod-classic
