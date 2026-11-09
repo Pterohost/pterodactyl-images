@@ -1,0 +1,172 @@
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index f8d0a956..02cba86f 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -2329,6 +2329,93 @@ NTSTATUS WINAPI NtQueryTimer( HANDLE handle, TIMER_INFORMATION_CLASS class,
+ }
+ 
+ 
++/*
++ * Pterohost: coalesce busy polling with zero-timeout waits.
++ *
++ * Some games poll WaitForMultipleObjects(..., 0) in a tight loop until a
++ * deadline.  Under Wine each poll is a full syscall (and a wineserver round
++ * trip without fsync), so the loop burns a whole core.  When a thread issues a
++ * zero-timeout wait shortly after its previous zero-timeout wait timed out,
++ * turn it into a short real wait instead:
++ *
++ *  - in-process sync (fsync/ntsync): a relative wait of WINE_POLL_COALESCE_US,
++ *    a signaled object still wakes the thread at once;
++ *  - wineserver sync: poll as usual, and if nothing is signaled sleep
++ *    WINE_POLL_COALESCE_US locally before returning STATUS_TIMEOUT
++ *    (WINE_POLL_COALESCE_SERVER_SLEEP=0 passes the short timeout to the server
++ *    instead, which may round it up to a millisecond).
++ *
++ * WINE_POLL_COALESCE_US (default 100, 0 disables), WINE_POLL_COALESCE_WINDOW_US
++ * (default 200): how recent the previous timed out poll must be.
++ */
++static LONGLONG poll_coalesce_ticks = -1;  /* -1: not initialized yet, 0: disabled */
++static LONGLONG poll_window_ticks;
++static int poll_server_sleep = 1;
++
++static LONGLONG init_poll_coalesce(void)
++{
++    const char *env;
++    LONGLONG us = 100, window = 200;
++
++    if ((env = getenv( "WINE_POLL_COALESCE_US" ))) us = atoi( env );
++    if ((env = getenv( "WINE_POLL_COALESCE_WINDOW_US" ))) window = atoi( env );
++    if ((env = getenv( "WINE_POLL_COALESCE_SERVER_SLEEP" ))) poll_server_sleep = atoi( env );
++    if (us < 0) us = 0;
++    if (us > 10000) us = 10000;
++    if (window < 0) window = 0;
++    poll_window_ticks = window * 10;
++    __atomic_store_n( &poll_coalesce_ticks, us * 10, __ATOMIC_RELEASE );
++    return us * 10;
++}
++
++/* returns the coalesce interval in 100ns ticks if this wait should be slowed down, 0 otherwise */
++static LONGLONG poll_streak_check( const LARGE_INTEGER *timeout )
++{
++    struct ntdll_thread_data *data = ntdll_get_thread_data();
++    LONGLONG ticks;
++
++    if (!timeout || timeout->QuadPart)
++    {
++        data->poll_streak_end = 0;
++        return 0;
++    }
++    if ((ticks = __atomic_load_n( &poll_coalesce_ticks, __ATOMIC_ACQUIRE )) < 0) ticks = init_poll_coalesce();
++    if (!ticks || !data->poll_streak_end) return 0;
++    if (monotonic_counter() - data->poll_streak_end >= poll_window_ticks) return 0;
++    return ticks;
++}
++
++static void poll_streak_update( const LARGE_INTEGER *timeout, NTSTATUS ret )
++{
++    struct ntdll_thread_data *data = ntdll_get_thread_data();
++
++    if (timeout && !timeout->QuadPart && ret == STATUS_TIMEOUT &&
++        __atomic_load_n( &poll_coalesce_ticks, __ATOMIC_RELAXED ) > 0)
++        data->poll_streak_end = monotonic_counter();
++    else
++        data->poll_streak_end = 0;
++}
++
++static NTSTATUS poll_server_wait( const union select_op *select_op, data_size_t size, UINT flags,
++                                  const LARGE_INTEGER *timeout, LONGLONG coalesce )
++{
++    LARGE_INTEGER short_timeout;
++    NTSTATUS ret;
++
++    if (coalesce && !poll_server_sleep)
++    {
++        short_timeout.QuadPart = -coalesce;
++        timeout = &short_timeout;
++    }
++    ret = server_wait( select_op, size, flags, timeout );
++    if (coalesce && poll_server_sleep && ret == STATUS_TIMEOUT)
++    {
++        struct timespec ts = { coalesce / 10000000, (coalesce % 10000000) * 100 };
++        nanosleep( &ts, NULL );
++    }
++    return ret;
++}
++
+ /******************************************************************
+  *		NtWaitForMultipleObjects (NTDLL.@)
+  */
+@@ -2338,6 +2425,8 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
+     union select_op select_op;
+     UINT i, flags = SELECT_INTERRUPTIBLE;
+     unsigned int ret;
++    LARGE_INTEGER short_timeout;
++    LONGLONG coalesce;
+ 
+     if (!count || count > MAXIMUM_WAIT_OBJECTS) return STATUS_INVALID_PARAMETER_1;
+     if (type != WaitAll && type != WaitAny) FIXME( "Unsupported wait type %u\n", type );
+@@ -2355,8 +2444,12 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
+         if (is_pseudo_handle( handles[i] )) return STATUS_INVALID_HANDLE;
+     }
+ 
+-    if ((ret = inproc_wait( count, handles, type, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
++    coalesce = poll_streak_check( timeout );
++    short_timeout.QuadPart = -coalesce;
++    if ((ret = inproc_wait( count, handles, type, alertable,
++                            coalesce ? &short_timeout : timeout )) != STATUS_NOT_IMPLEMENTED)
+     {
++        poll_streak_update( timeout, ret );
+         TRACE( "-> %#x\n", ret );
+         return ret;
+     }
+@@ -2364,7 +2457,8 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
+     if (alertable) flags |= SELECT_ALERTABLE;
+     select_op.wait.op = type == WaitAll ? SELECT_WAIT_ALL : SELECT_WAIT;
+     for (i = 0; i < count; i++) select_op.wait.handles[i] = wine_server_obj_handle( handles[i] );
+-    ret = server_wait( &select_op, offsetof( union select_op, wait.handles[count] ), flags, timeout );
++    ret = poll_server_wait( &select_op, offsetof( union select_op, wait.handles[count] ), flags, timeout, coalesce );
++    poll_streak_update( timeout, ret );
+     TRACE( "-> %#x\n", ret );
+     return ret;
+ }
+@@ -2378,11 +2472,17 @@ NTSTATUS WINAPI NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const L
+     union select_op select_op;
+     UINT flags = SELECT_INTERRUPTIBLE;
+     unsigned int ret;
++    LARGE_INTEGER short_timeout;
++    LONGLONG coalesce;
+ 
+     TRACE( "handle %p, alertable %u, timeout %s\n", handle, alertable, debugstr_timeout(timeout) );
+ 
+-    if ((ret = inproc_wait( 1, &handle, WaitAny, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
++    coalesce = poll_streak_check( timeout );
++    short_timeout.QuadPart = -coalesce;
++    if ((ret = inproc_wait( 1, &handle, WaitAny, alertable,
++                            coalesce ? &short_timeout : timeout )) != STATUS_NOT_IMPLEMENTED)
+     {
++        poll_streak_update( timeout, ret );
+         TRACE( "-> %#x\n", ret );
+         return ret;
+     }
+@@ -2390,7 +2490,8 @@ NTSTATUS WINAPI NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const L
+     if (alertable) flags |= SELECT_ALERTABLE;
+     select_op.wait.op = SELECT_WAIT;
+     select_op.wait.handles[0] = wine_server_obj_handle( handle );
+-    ret = server_wait( &select_op, offsetof( union select_op, wait.handles[1] ), flags, timeout );
++    ret = poll_server_wait( &select_op, offsetof( union select_op, wait.handles[1] ), flags, timeout, coalesce );
++    poll_streak_update( timeout, ret );
+     TRACE( "-> %#x\n", ret );
+     return ret;
+ }
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 3f700e44..f27791ab 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -117,6 +117,7 @@ struct ntdll_thread_data
+     void                     *param;         /* thread entry point parameter */
+     void                     *jmp_buf;       /* setjmp buffer for exception handling */
+     int                      *fsync_apc_futex;
++    ULONGLONG                 poll_streak_end; /* end time of the last timed out zero-timeout wait, 0 if none */
+ };
+ 
+ C_ASSERT( sizeof(struct ntdll_thread_data) <= sizeof(((TEB *)0)->GdiTebBatch) );

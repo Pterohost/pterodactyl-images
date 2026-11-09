@@ -7,13 +7,13 @@
 # the bootstrap owns the stop and waits for the save (measured: world0.ksd is
 # rewritten at the stop, the exit is clean), and no display server runs.
 #
-# Idle cost, measured on an empty server: ~0.35 of a core on either runtime.
-# Most of it is the game's own network loop, which polls for the last
-# millisecond of every 5 ms tick; that does not depend on the translation
-# layer. GE-Proton switches thread synchronisation to futexes (fsync) wherever
-# the container may call futex_waitv, which removes wineserver's share
-# (~0.12 core and ~22k context switches a second); elsewhere it falls back to
-# wineserver on its own.
+# Idle cost, measured on an empty server: ~0.35 of a core on stock Wine or
+# GE-Proton. Most of it is the game's own network loop, which polls with
+# zero-timeout waits for the last millisecond of every 5 ms tick, and under
+# Wine every one of those polls is a full system call (or a wineserver round
+# trip). The ntdll stage below fixes that in Wine itself: ~0.15 of a core, and
+# ~0.09 where the container may use futex_waitv and GE-Proton synchronises
+# in-process (fsync). WINE_POLL_COALESCE_US=0 turns the change off.
 #
 # Same base as images/palworld-proton and for the same reason: GE-Proton11's
 # ntdll.so needs glibc >= 2.38, the shared SteamCMD base is debian:12 (2.36).
@@ -23,6 +23,39 @@
 # server volume and persist.
 #
 # amd64 only.
+ARG GE_PROTON_VERSION=GE-Proton11-3
+ARG GE_PROTON_SHA512=528ae7831f909c0a4fff5d83889ac6dab3c9706746cd148f05f3064ac042763853d68277e2a815f18f16c17285d5d128864a03c563956c0dce30bafcd16aa77c
+
+# The release, pinned by hash.
+FROM ubuntu:24.04 AS proton
+ARG GE_PROTON_VERSION
+ARG GE_PROTON_SHA512
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && mkdir -p /opt/pterohost-proton \
+    && curl -fsSL -o /tmp/proton.tar.gz \
+       "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/${GE_PROTON_VERSION}/${GE_PROTON_VERSION}.tar.gz" \
+    && echo "${GE_PROTON_SHA512}  /tmp/proton.tar.gz" | sha512sum -c - \
+    && tar -xzf /tmp/proton.tar.gz -C /opt/pterohost-proton --strip-components=1 \
+    && rm -f /tmp/proton.tar.gz \
+    && test -f /opt/pterohost-proton/proton
+
+# ntdll.so of that same release, rebuilt from its exact sources with
+# images/enshrouded/wine/*.patch applied. The game polls for the last
+# millisecond of every network tick with zero-timeout waits; the patch turns a
+# repeated zero-timeout wait into a short real one, which takes an idle server
+# from ~0.35 to ~0.15 of a core (~0.09 with in-process sync). The wine and
+# staging commits must be the ones the GE tag pins: bump all three together.
+FROM ubuntu:24.04 AS ntdll
+ARG GE_PROTON_VERSION
+ARG GE_WINE_SHA=9578fa3613f3379179b576968bc77c8161ab6ea8
+ARG GE_STAGING_SHA=6cc805ea57132eeaf44764e9213823c9b8d0d300
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates git build-essential gcc-mingw-w64-x86-64 flex bison autoconf python3 perl patch binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=proton /opt/pterohost-proton /release
+COPY images/enshrouded/wine/ /src/
+RUN bash /src/build-ntdll.sh "${GE_PROTON_VERSION}" "${GE_WINE_SHA}" "${GE_STAGING_SHA}" /release /ntdll.so
+
 FROM ubuntu:24.04
 
 LABEL org.opencontainers.image.source="https://github.com/Pterohost/pterodactyl-images"
@@ -67,17 +100,9 @@ RUN mkdir -p /opt/steamcmd \
        | tar -xz -C /opt/steamcmd \
     && chmod -R 0777 /opt/steamcmd
 
-# Pinned GE-Proton, the same build as palworld-proton.
-ARG GE_PROTON_VERSION=GE-Proton11-3
-ARG GE_PROTON_SHA512=528ae7831f909c0a4fff5d83889ac6dab3c9706746cd148f05f3064ac042763853d68277e2a815f18f16c17285d5d128864a03c563956c0dce30bafcd16aa77c
-RUN mkdir -p /opt/pterohost-proton \
-    && curl -fsSL -o /tmp/proton.tar.gz \
-       "https://github.com/GloriousEggroll/proton-ge-custom/releases/download/${GE_PROTON_VERSION}/${GE_PROTON_VERSION}.tar.gz" \
-    && echo "${GE_PROTON_SHA512}  /tmp/proton.tar.gz" | sha512sum -c - \
-    && tar -xzf /tmp/proton.tar.gz -C /opt/pterohost-proton --strip-components=1 \
-    && rm -f /tmp/proton.tar.gz \
-    && test -f /opt/pterohost-proton/proton \
-    && chmod -R a+rX /opt/pterohost-proton
+COPY --from=proton /opt/pterohost-proton /opt/pterohost-proton
+COPY --from=ntdll /ntdll.so /opt/pterohost-proton/files/lib/wine/x86_64-unix/ntdll.so
+RUN chmod -R a+rX /opt/pterohost-proton
 
 # A wrapper, not a symlink: the launcher resolves its toolchain from its own path.
 RUN printf '#!/bin/sh\nexec python3 /opt/pterohost-proton/proton "$@"\n' > /usr/local/bin/proton \
