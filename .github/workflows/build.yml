@@ -98,6 +98,9 @@ jobs:
       - name: images/rust/start-rust.test.sh
         run: bash images/rust/start-rust.test.sh
 
+      - name: images/vintagestory/start-vintagestory.test.sh
+        run: bash images/vintagestory/start-vintagestory.test.sh
+
       - name: images/gmod/netping.test.sh
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends luajit
@@ -230,6 +233,11 @@ jobs:
             # the Linux install outright. Here rather than in `derived` for the
             # same reason as palworld_proton - GE-Proton needs glibc >= 2.38 and
             # the SteamCMD base is debian:12.
+            platforms: linux/amd64
+          - tag: vintagestory
+            dir: vintagestory
+            # FROM yolks:dotnet_10 - the game is not a Steam app; .NET 8 is
+            # added for releases before 1.22.
             platforms: linux/amd64
           - tag: gmod_classic
             dir: gmod-classic

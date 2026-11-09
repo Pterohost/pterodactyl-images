@@ -1,0 +1,138 @@
+#!/bin/bash
+# Pterohost Vintage Story bootstrap.
+#
+# The command line lives in the egg (shared/launch.sh contract); this script
+# only adds what a static startup string cannot express:
+#
+#   1. The .NET runtime the installed game asks for. 1.22 needs .NET 10, 1.21
+#      and older need .NET 8, and servers pinned to an older release must keep
+#      starting on the same image. Both runtimes are in the image; the script
+#      checks the one VintagestoryServer.runtimeconfig.json names is present
+#      and says so plainly when it is not, instead of letting the apphost fail
+#      with a generic "You must install or update .NET".
+#
+#   2. The GC heap ceiling. Inside a memory-limited container .NET caps the GC
+#      heap at 75% of the limit. Measured on live servers the game's memory
+#      outside the managed heap is ~0.2 GB, so on a 4 GB plan the heap sits at
+#      its ceiling (2.9 of 3.3 GB) while ~1 GB of the plan is never used, and a
+#      heap at its ceiling runs blocking full collections - multi-second ticks.
+#      VS_GC_HEAP_PERCENT (default 85) moves the ceiling; an explicit
+#      DOTNET_GCHeapHardLimit* set by the owner always wins.
+#
+#   3. --reducedthreads on small plans. The server starts ~57 threads; on a
+#      plan of two cores or less the game's own switch trades a little peak
+#      throughput for less scheduler contention. Read from the container's CPU
+#      quota, not nproc, which reports the host's cores.
+
+set -u
+cd /home/container || exit 1
+
+# shellcheck source=/dev/null
+. /usr/local/lib/pterohost/launch.sh
+
+log() { pterohost_log "$@"; }
+
+# The egg's free-form flags variable is OPTIONS, not ADDITIONAL_ARGS.
+PTEROHOST_ARGS_VAR=OPTIONS
+
+DOTNET_ROOT="${DOTNET_ROOT:-/usr/share/}"
+export DOTNET_ROOT
+
+# vs_runtime_major <runtimeconfig.json>
+#   Prints the major version of Microsoft.NETCore.App the game requires.
+vs_runtime_major() {
+    [ -f "$1" ] || return 1
+    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)\..*/\1/p' "$1" | head -n 1
+}
+
+# vs_has_runtime <major>
+vs_has_runtime() {
+    local d
+    for d in "${DOTNET_ROOT%/}"/shared/Microsoft.NETCore.App/"$1".*; do
+        [ -d "$d" ] && return 0
+    done
+    return 1
+}
+
+# vs_cpu_milli
+#   The container's CPU quota in thousandths of a core (cgroup v2, then v1),
+#   or the host's cores when there is no quota.
+vs_cpu_milli() {
+    local q="" p="" milli=""
+    if [ -r /sys/fs/cgroup/cpu.max ]; then
+        read -r q p < /sys/fs/cgroup/cpu.max 2>/dev/null
+        if [ "${q}" != "max" ] && [ -n "${q}" ] && [ -n "${p}" ] && [ "${p}" -gt 0 ] 2>/dev/null; then
+            milli=$(( q * 1000 / p ))
+        fi
+    elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ] && [ -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]; then
+        q=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null)
+        p=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us 2>/dev/null)
+        if [ -n "${q}" ] && [ "${q}" -gt 0 ] 2>/dev/null && [ -n "${p}" ] && [ "${p}" -gt 0 ] 2>/dev/null; then
+            milli=$(( q * 1000 / p ))
+        fi
+    fi
+    if [ -z "${milli}" ] || [ "${milli}" -lt 1 ] 2>/dev/null; then
+        milli=$(( $(nproc 2>/dev/null || echo 1) * 1000 ))
+    fi
+    echo "${milli}"
+}
+
+# vs_gc_env
+#   Exports the GC heap ceiling unless the owner set one. The runtime reads
+#   DOTNET_GC* values as hexadecimal.
+vs_gc_env() {
+    local pct="${VS_GC_HEAP_PERCENT:-85}"
+    if env | grep -q -E '^(DOTNET|COMPlus)_GCHeapHardLimit'; then
+        log "GC heap limit: taken from the server's own DOTNET_GCHeapHardLimit setting."
+        return 0
+    fi
+    case "${pct}" in
+        ''|0|off) log "GC heap limit: .NET default (75% of the plan)."; return 0 ;;
+    esac
+    if ! [ "${pct}" -ge 50 ] 2>/dev/null || ! [ "${pct}" -le 95 ] 2>/dev/null; then
+        log "WARN: VS_GC_HEAP_PERCENT=${pct} is outside 50-95 - using 85."
+        pct=85
+    fi
+    DOTNET_GCHeapHardLimitPercent="$(printf '0x%x' "${pct}")"
+    export DOTNET_GCHeapHardLimitPercent
+    log "GC heap limit: ${pct}% of the plan's memory."
+}
+
+# vs_reduced_threads
+#   Appends --reducedthreads to PTEROHOST_ARGS: VS_REDUCED_THREADS=auto (the
+#   default) on plans of two cores or less, 1 always, 0 never. A flag already
+#   in the panel line is never doubled.
+vs_reduced_threads() {
+    case "${VS_REDUCED_THREADS:-auto}" in
+        auto) [ "$(vs_cpu_milli)" -le 2000 ] || return 0 ;;
+        1) ;;
+        *) return 0 ;;
+    esac
+    pterohost_append_if_absent --reducedthreads --reducedthreads
+}
+
+# Sourced by the test: functions only.
+[ "${VS_SOURCE_ONLY:-0}" = "1" ] && return 0 2>/dev/null
+
+MAJOR="$(vs_runtime_major ./VintagestoryServer.runtimeconfig.json)"
+if [ -z "${MAJOR}" ]; then
+    log "WARN: VintagestoryServer.runtimeconfig.json not found - is the game installed? Reinstall the server from the panel."
+elif vs_has_runtime "${MAJOR}"; then
+    log "Game asks for .NET ${MAJOR} - present."
+else
+    log "ERROR: this game version needs .NET ${MAJOR}, which this image does not ship. Pick a game version that runs on .NET 8 or 10, or report it to support."
+fi
+
+vs_gc_env
+
+pterohost_panel_argv "$@"
+if [ "${PTEROHOST_FROM_PANEL}" != "1" ]; then
+    PTEROHOST_ARGS=(./VintagestoryServer --dataPath ./data --port "${SERVER_PORT:-42420}" --maxclients "${MAX_CLIENTS:-16}")
+fi
+
+vs_reduced_threads
+
+pterohost_log_cmd "${PTEROHOST_ARGS[@]}"
+# exec: the game reads console commands from stdin and the egg's stop command
+# is "/stop", which saves the world before exiting.
+exec "${PTEROHOST_ARGS[@]}"
