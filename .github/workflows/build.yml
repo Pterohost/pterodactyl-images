@@ -39,7 +39,10 @@ jobs:
   # bootstrap naming a library ld.so could not find - reached 65 live servers.
   test:
     name: "shell contract tests"
-    runs-on: ubuntu-latest
+    # The scripts under test run on Debian with GNU coreutils. ubuntu-latest
+    # moved to 26.04, whose coreutils (uutils) handle signals differently in
+    # tee, so the tests stay on a GNU userland like the images.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
