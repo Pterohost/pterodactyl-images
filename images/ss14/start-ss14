@@ -52,6 +52,7 @@ PTEROHOST_ARGS_VAR=ADDITIONAL_ARGS
 SS14_KEY=ss14
 SS14_DEFAULT_MANIFEST="https://wizards.cdn.spacestation14.com/fork/wizards/manifest"
 SS14_STATE_DIR="/home/container/.ss14"
+SS14_TOKEN_FILE="${SS14_TOKEN_FILE:-/tmp/ss14-api-token}"
 SS14_INSTANCE_DIR="/home/container/instances/${SS14_KEY}"
 
 # ss14_is_int <value> <min> <max>
@@ -228,15 +229,13 @@ ss14_update_mode() {
 }
 
 # ss14_token
-#   The watchdog API token is the owner's to never see. WATCHDOG_TOKEN from the
-#   panel wins when set; otherwise one is generated on first start and kept.
+#   The watchdog API token is the owner's to never see, and nothing outside the
+#   container can use it: the API listens on loopback only. WATCHDOG_TOKEN from
+#   the panel wins when set; otherwise a fresh one is generated at every start
+#   and kept only in /tmp (not on the volume, so not in the file manager).
 ss14_token() {
-    local file="${SS14_STATE_DIR}/api-token" token
-    mkdir -p "${SS14_STATE_DIR}" || return 1
+    local file="${SS14_TOKEN_FILE}" token
     token="${WATCHDOG_TOKEN:-}"
-    if [ -z "${token}" ] && [ -s "${file}" ]; then
-        return 0
-    fi
     if [ -z "${token}" ]; then
         token="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
     fi
@@ -533,7 +532,7 @@ esac
 
 ss14_reset_watchdog_state "${MODE}"
 WD_PORT="$(ss14_watchdog_port)"
-ss14_export_watchdog_env "${MODE}" "${SS14_STATE_DIR}/api-token" "${WD_PORT}" "${SERVER_EXTRA_ARGS[@]}"
+ss14_export_watchdog_env "${MODE}" "${SS14_TOKEN_FILE}" "${WD_PORT}" "${SERVER_EXTRA_ARGS[@]}"
 ss14_export_cvars
 
 log "Game: UDP and TCP ${SERVER_PORT}; slots ${MAX_PLAYERS:-30}; database ${DB_ENGINE:-sqlite}; hub listing $([ "$(ss14_flag "${HUB_ADVERTISE:-0}")" = 1 ] && echo on || echo off)."
@@ -542,7 +541,7 @@ if [ "${#SERVER_EXTRA_ARGS[@]}" -gt 0 ]; then
 fi
 
 if [ "${MODE}" = "manifest" ] && [ "$(ss14_flag "${AUTO_UPDATE:-1}")" = 1 ]; then
-    ss14_update_loop "${WD_PORT}" "${SS14_STATE_DIR}/api-token" &
+    ss14_update_loop "${WD_PORT}" "${SS14_TOKEN_FILE}" &
 fi
 
 WATCHDOG_BIN="${SS14_WATCHDOG_DIR:-/opt/ss14-watchdog}/SS14.Watchdog"

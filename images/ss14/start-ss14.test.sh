@@ -113,14 +113,16 @@ check "installed, updates off -> pinned" pinned "$(AUTO_UPDATE=0 ss14_update_mod
 check "zip url wins" zip "$(SERVER_ZIP_URL=https://x/y.zip AUTO_UPDATE=0 ss14_update_mode)"
 
 # --- token -------------------------------------------------------------------
+SS14_TOKEN_FILE="${tmp}/api-token"
 ss14_token
-t1="$(cat "${SS14_STATE_DIR}/api-token")"
+t1="$(cat "${SS14_TOKEN_FILE}")"
 check "token generated" 1 "$([ "${#t1}" -ge 32 ] && echo 1 || echo 0)"
-check "token mode 600" 600 "$(stat -c %a "${SS14_STATE_DIR}/api-token")"
+check "token mode 600" 600 "$(stat -c %a "${SS14_TOKEN_FILE}")"
 ss14_token
-check "token kept across starts" "${t1}" "$(cat "${SS14_STATE_DIR}/api-token")"
+check "token fresh at every start" 1 "$([ "$(cat "${SS14_TOKEN_FILE}")" != "${t1}" ] && echo 1 || echo 0)"
+check "token never lands on the volume" 0 "$(find "${SS14_STATE_DIR}" -name 'api-token*' | grep -c .)"
 WATCHDOG_TOKEN=fromthepanel ss14_token
-check "panel token wins" fromthepanel "$(cat "${SS14_STATE_DIR}/api-token")"
+check "panel token wins" fromthepanel "$(cat "${SS14_TOKEN_FILE}")"
 
 # --- config.toml is the owner's ----------------------------------------------
 ss14_write_config_toml
